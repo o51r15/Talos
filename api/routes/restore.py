@@ -40,6 +40,21 @@ async def trigger_restore(container_name: str, options: RestoreOptions):
             detail="At least one of restore_data, restore_compose, or restore_internal must be true",
         )
 
+    # Each enabled restore type must have a backup selected — otherwise the
+    # engine would silently skip it and report success having done nothing.
+    missing = []
+    if options.restore_data and not options.backup_id_data:
+        missing.append("backup_id_data")
+    if options.restore_compose and not options.backup_id_compose:
+        missing.append("backup_id_compose")
+    if options.restore_internal and not options.backup_id_internal:
+        missing.append("backup_id_internal")
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Restore type enabled but no backup selected: {', '.join(missing)}",
+        )
+
     container = dc.get_container(container_name)
     if not container:
         raise HTTPException(status_code=404, detail=f"Container '{container_name}' not found")

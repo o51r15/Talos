@@ -65,7 +65,10 @@ def list_jobs(container_name: Optional[str] = None, limit: int = 50) -> List[Job
     jobs = list(_jobs.values())
     if container_name:
         jobs = [j for j in jobs if j.container_name == container_name]
-    jobs.sort(key=lambda j: j.started_at or datetime.min, reverse=True)
+    # started_at is timezone-aware; a naive datetime.min would raise TypeError
+    # when sorted against it, so the fallback must be aware too.
+    epoch = datetime.min.replace(tzinfo=timezone.utc)
+    jobs.sort(key=lambda j: j.started_at or epoch, reverse=True)
     return jobs[:limit]
 
 

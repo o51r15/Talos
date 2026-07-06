@@ -385,9 +385,11 @@ function _openRestoreModalInternal(preSelected) {
   const c = state.containers.find(c => c.name === state.selected);
   if (!c) return;
 
-  const dataBackups    = state.backups.filter(b => b.backup_type === 'data');
-  const composeBackups = state.backups.filter(b => b.backup_type === 'compose');
-  const internalBackups = state.backups.filter(b => b.backup_type === 'internal');
+  // Snapshots are restorable too — merge them in, marked with ⚠
+  const all = [...state.backups, ...state.snapshots];
+  const dataBackups    = all.filter(b => b.backup_type === 'data');
+  const composeBackups = all.filter(b => b.backup_type === 'compose');
+  const internalBackups = all.filter(b => b.backup_type === 'internal');
 
   // Group internal backups by timestamp — each group is one snapshot set (all volumes)
   const internalGroups = groupInternalByTimestamp(internalBackups);
@@ -399,9 +401,9 @@ function _openRestoreModalInternal(preSelected) {
         ${items.map((b, i) => `
           <label class="backup-select-item ${preFile === b.filename ? 'selected' : ''}">
             <input type="radio" name="${prefix}" value="${esc(b.filename)}"
-              ${(preFile === b.filename || i === 0) ? 'checked' : ''}>
+              ${(preFile === b.filename || (i === 0 && !preFile)) ? 'checked' : ''}>
             <span class="backup-type-badge ${b.backup_type}">${b.backup_type}</span>
-            <span style="flex:1;font-family:var(--font-mono);font-size:12px">${formatDate(b.timestamp)}</span>
+            <span style="flex:1;font-family:var(--font-mono);font-size:12px">${formatDate(b.timestamp)}${b.is_restore_snapshot ? ' <span style="color:var(--amber);font-size:10px">⚠ snapshot</span>' : ''}</span>
             <span style="color:var(--text-muted);font-size:11px">${b.size_human}</span>
           </label>
         `).join('')}
@@ -491,18 +493,32 @@ function humanSize(bytes) {
 }
 
 async function submitRestore(c) {
+  const idData     = document.querySelector('input[name="rs-data-id"]:checked')?.value || null;
+  const idCompose  = document.querySelector('input[name="rs-compose-id"]:checked')?.value || null;
+  const idInternal = document.querySelector('input[name="rs-internal-id"]:checked')?.value || null;
+
+  // A restore type is only enabled if its box is checked AND a backup is selected
   const opts = {
-    restore_data:       document.getElementById('rs-data')?.checked ?? false,
-    restore_compose:    document.getElementById('rs-compose')?.checked ?? false,
-    restore_internal:   document.getElementById('rs-internal')?.checked ?? false,
-    backup_id_data:     document.querySelector('input[name="rs-data-id"]:checked')?.value || null,
-    backup_id_compose:  document.querySelector('input[name="rs-compose-id"]:checked')?.value || null,
-    backup_id_internal: document.querySelector('input[name="rs-internal-id"]:checked')?.value || null,
+    restore_data:       (document.getElementById('rs-data')?.checked ?? false) && !!idData,
+    restore_compose:    (document.getElementById('rs-compose')?.checked ?? false) && !!idCompose,
+    restore_internal:   (document.getElementById('rs-internal')?.checked ?? false) && !!idInternal,
+    backup_id_data:     idData,
+    backup_id_compose:  idCompose,
+    backup_id_internal: idInternal,
   };
+
+  if (!opts.restore_data && !opts.restore_compose && !opts.restore_internal) {
+    showToast('error', 'Nothing to restore', 'Select at least one backup type with a backup chosen.');
+    return;
+  }
 
   closeModal();
   try {
     const job = await API.triggerRestore(c.name, opts);
+    if (job.detail) {  // FastAPI error envelope
+      showToast('error', 'Restore rejected', job.detail);
+      return;
+    }
     trackJob(job, c.name, 'restore');
   } catch (e) {
     showToast('error', 'Restore failed', e.message);

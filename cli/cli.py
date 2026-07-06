@@ -258,9 +258,9 @@ def restore_cmd(ctx, container):
 
     success = run_restore(c, options, log_cb=_log_cb)
     if success:
-        console.print(f"\n[bold green]✓ Restore complete[/bold green]")
+        console.print("\n[bold green]✓ Restore complete[/bold green]")
     else:
-        console.print(f"\n[bold red]✗ Restore failed — check output above[/bold red]")
+        console.print("\n[bold red]✗ Restore failed — check output above[/bold red]")
         sys.exit(1)
 
 

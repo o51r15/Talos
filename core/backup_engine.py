@@ -166,10 +166,12 @@ def _backup_compose(
 
     _log(f"Archiving compose file(s): {config_files}")
     try:
+        # Path-safe prefix: '/docker/app' must not match '/docker/app2/compose.yml'
+        wd_prefix = working_dir.rstrip(os.sep) + os.sep if working_dir else None
         with tarfile.open(dest_path, "w:gz") as tar:
             for cf in config_files:
                 if os.path.isfile(cf):
-                    if working_dir and cf.startswith(working_dir):
+                    if wd_prefix and cf.startswith(wd_prefix):
                         arcname = os.path.relpath(cf, working_dir)
                     else:
                         arcname = os.path.basename(cf)

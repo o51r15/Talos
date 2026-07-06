@@ -11,11 +11,17 @@ Sequence for a full restore:
 
 Partial restores (data-only, compose-only, internal-only) are supported.
 
+Backup ID resolution:
+  Backup IDs are filenames. They are resolved first against
+  {backup_dest}/{container}/ and then against
+  {restore_snapshot_dir}/{container}/ — so safety snapshots are
+  restorable exactly like regular backups.
+
 Internal restore:
   The client passes any one filename from the target snapshot set as
-  backup_id_internal. The engine finds ALL internal files sharing that
-  timestamp, then restores each named volume via busybox and handles any
-  legacy docker-save .tar files for backward compatibility.
+  backup_id_internal. The engine finds ALL internal files in the same
+  directory sharing that timestamp, restores each named volume via
+  busybox, and handles legacy docker-save .tar files.
 """
 
 from __future__ import annotations
@@ -34,6 +40,10 @@ from . import docker_client as dc
 log = logging.getLogger(__name__)
 
 LogCallback = Callable[[str, str], None]
+
+# Python 3.12+ tarfile extraction filter — blocks path traversal, device
+# nodes, and absolute paths. On older Pythons the kwarg doesn't exist.
+_EXTRACT_KWARGS = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
 
 
 # ── Public entry point ─────────────────────────────────────────────────────────
@@ -118,6 +128,22 @@ def run_restore(
     return success
 
 
+# ── Backup ID resolution ───────────────────────────────────────────────────────
+
+def _resolve_backup_path(container_name: str, backup_id: str) -> Optional[Path]:
+    """
+    Resolve a backup filename to a full path.
+    Checks the normal backup directory first, then the safety snapshot
+    directory — so restore snapshots are restorable like any other backup.
+    """
+    cfg = get_config()
+    for base in (cfg.backup_dest, cfg.restore_snapshot_dir):
+        candidate = Path(base) / container_name / backup_id
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 # ── Safety snapshot ────────────────────────────────────────────────────────────
 
 def _take_safety_snapshot(
@@ -170,11 +196,9 @@ def _restore_data(
     backup_id: str,
     _log: LogCallback,
 ) -> bool:
-    cfg = get_config()
-    backup_path = Path(cfg.backup_dest) / container.name / backup_id
-
-    if not backup_path.exists():
-        _log(f"Backup file not found: {backup_path}", "error")
+    backup_path = _resolve_backup_path(container.name, backup_id)
+    if not backup_path:
+        _log(f"Backup file not found: {backup_id}", "error")
         return False
 
     if not container.data_dir:
@@ -196,14 +220,19 @@ def _restore_data(
     _log(f"Extracting {backup_id} -> {data_dir}")
     try:
         with tarfile.open(backup_path, "r:gz") as tar:
-            members = tar.getmembers()
-            for member in members:
+            for member in tar.getmembers():
                 parts = Path(member.name).parts
-                if len(parts) > 1:
+                if len(parts) <= 1:
+                    # Top-level directory entry itself — nothing to extract.
+                    # A bare file at archive root keeps its name as-is.
+                    if member.isdir():
+                        continue
+                else:
+                    # Strip the leading directory (the data dir's name at
+                    # backup time) so contents extract INTO data_dir even
+                    # if the directory has been renamed since the backup.
                     member.name = str(Path(*parts[1:]))
-                elif len(parts) == 1 and parts[0] == data_dir.name:
-                    continue
-                tar.extract(member, path=data_dir.parent)
+                tar.extract(member, path=data_dir, **_EXTRACT_KWARGS)
         _log("Data extraction complete")
         return True
     except Exception as e:
@@ -218,11 +247,9 @@ def _restore_compose(
     backup_id: str,
     _log: LogCallback,
 ) -> bool:
-    cfg = get_config()
-    backup_path = Path(cfg.backup_dest) / container.name / backup_id
-
-    if not backup_path.exists():
-        _log(f"Compose backup not found: {backup_path}", "error")
+    backup_path = _resolve_backup_path(container.name, backup_id)
+    if not backup_path:
+        _log(f"Compose backup not found: {backup_id}", "error")
         return False
 
     if not container.compose or not container.compose.working_dir:
@@ -235,7 +262,7 @@ def _restore_compose(
     _log(f"Extracting compose archive to {working_dir}")
     try:
         with tarfile.open(backup_path, "r:gz") as tar:
-            tar.extractall(path=working_dir)
+            tar.extractall(path=working_dir, **_EXTRACT_KWARGS)
         _log("Compose extraction complete")
         return True
     except Exception as e:
@@ -253,17 +280,18 @@ def _restore_internal(
     """
     Restore all named volumes that share the same timestamp as backup_id.
 
-    The client passes any one filename from the snapshot set (the restore engine
-    finds the full set by matching the timestamp). This means a user can select
-    any file from a snapshot group and all volumes in that snapshot are restored.
-
-    Also handles legacy docker-save .tar files for backward compatibility.
+    The reference file may live in the backup dir or the snapshot dir —
+    the full set is collected from whichever directory the reference
+    file was found in.
     """
-    cfg = get_config()
-    backup_dir = Path(cfg.backup_dest) / container.name
+    backup_path = _resolve_backup_path(container.name, backup_id)
+    if not backup_path:
+        _log(f"Internal backup not found: {backup_id}", "error")
+        return False
 
-    # Parse timestamp from the reference filename
-    ref_record = BackupRecord.from_path(str(backup_dir / backup_id))
+    backup_dir = backup_path.parent
+
+    ref_record = BackupRecord.from_path(str(backup_path))
     if not ref_record:
         _log(f"Cannot parse backup ID: {backup_id}", "error")
         return False
@@ -271,13 +299,9 @@ def _restore_internal(
     ts_str = ref_record.timestamp.strftime("%Y-%m-%d_%H-%M-%S")
     _log(f"Restoring internal snapshot: {ts_str}")
 
-    # Collect all internal files that share this timestamp
+    # Collect all internal files in the same directory sharing this timestamp
     vol_records: List[BackupRecord] = []
     legacy_records: List[BackupRecord] = []
-
-    if not backup_dir.exists():
-        _log(f"Backup directory not found: {backup_dir}", "error")
-        return False
 
     for f in backup_dir.iterdir():
         if not f.is_file():

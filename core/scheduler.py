@@ -40,7 +40,15 @@ def start_scheduler() -> None:
         return
 
     _scheduler = BackgroundScheduler(timezone="UTC")
-    trigger = CronTrigger.from_crontab(cfg.schedule.cron, timezone="UTC")
+    try:
+        trigger = CronTrigger.from_crontab(cfg.schedule.cron, timezone="UTC")
+    except ValueError as e:
+        log.error(
+            f"Invalid cron expression '{cfg.schedule.cron}': {e} — "
+            "scheduler NOT started. Fix schedule.cron in config and reload."
+        )
+        _scheduler = None
+        return
     _scheduler.add_job(
         _run_scheduled_backup,
         trigger=trigger,

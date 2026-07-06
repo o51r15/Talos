@@ -281,7 +281,7 @@ class TestComposeSiblings:
              patch("core.backup_engine.dc.stop_container", return_value=True), \
              patch("core.backup_engine.dc.start_container", return_value=True), \
              patch("core.backup_engine.dc.get_container", get_container_mock), \
-             patch("core.backup_engine.enrich_with_compose", enrich_mock):
+             patch("core.compose_discovery.enrich_with_compose", enrich_mock):
             from core.backup_engine import run_backup
             records = run_backup(full_container, opts)
 
@@ -311,7 +311,7 @@ class TestComposeSiblings:
              patch("core.backup_engine.dc.stop_container", return_value=True), \
              patch("core.backup_engine.dc.start_container", return_value=True), \
              patch("core.backup_engine.dc.get_container", return_value=self_container), \
-             patch("core.backup_engine.enrich_with_compose", side_effect=lambda c: c):
+             patch("core.compose_discovery.enrich_with_compose", side_effect=lambda c: c):
             from core.backup_engine import run_backup
             records = run_backup(full_container, opts)
 
@@ -367,7 +367,7 @@ class TestComposeSiblings:
              patch("core.backup_engine.dc.stop_container", return_value=True), \
              patch("core.backup_engine.dc.start_container", return_value=True), \
              patch("core.backup_engine.dc.get_container", side_effect=original_get), \
-             patch("core.backup_engine.enrich_with_compose", side_effect=lambda c: c):
+             patch("core.compose_discovery.enrich_with_compose", side_effect=lambda c: c):
             from core.backup_engine import run_backup
             records = run_backup(full_container, opts)
 

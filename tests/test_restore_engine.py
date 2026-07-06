@@ -114,8 +114,56 @@ class TestSafetySnapshot:
 
 class TestRestoreData:
 
+    def _make_real_data_backup(self, tmp_path, container_name="myapp", ts="2026-07-06_02-00-00",
+                               dest="backups"):
+        """
+        Build an archive exactly the way the backup engine builds it:
+        tar.add(data_path, arcname=data_path.name) — members are
+        'myapp', 'myapp/restored.db', 'myapp/sub/nested.txt'.
+        """
+        import tarfile
+        src = tmp_path / "src_stage" / container_name
+        (src / "sub").mkdir(parents=True)
+        (src / "restored.db").write_bytes(b"restored content")
+        (src / "sub" / "nested.txt").write_bytes(b"nested")
+
+        backup_dir = tmp_path / dest / container_name
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        path = backup_dir / f"{container_name}_data_{ts}.tar.gz"
+        with tarfile.open(path, "w:gz") as tar:
+            tar.add(src, arcname=src.name)
+        return path
+
+    def test_restored_files_land_inside_data_dir(self, tmp_path, container):
+        """
+        Regression test: files must extract INTO data_dir, not into its parent.
+        The archive top-level dir is stripped and contents placed in data_dir.
+        """
+        backup_file = self._make_real_data_backup(tmp_path)
+        cfg = _cfg(tmp_path)
+        data_dir = Path(container.data_dir)
+
+        with patch("core.restore_engine.get_config", return_value=cfg), \
+             patch("core.restore_engine._take_safety_snapshot", return_value=[]), \
+             patch("core.restore_engine.dc.stop_container", return_value=True), \
+             patch("core.restore_engine.dc.start_container", return_value=True):
+            from core.restore_engine import run_restore
+            opts = RestoreOptions(
+                restore_data=True, restore_compose=False,
+                backup_id_data=backup_file.name,
+            )
+            result = run_restore(container, opts)
+
+        assert result is True
+        # Files must be INSIDE data_dir
+        assert (data_dir / "restored.db").read_bytes() == b"restored content"
+        assert (data_dir / "sub" / "nested.txt").read_bytes() == b"nested"
+        # And must NOT have leaked into the parent directory
+        assert not (data_dir.parent / "restored.db").exists()
+        assert not (data_dir.parent / "sub").exists()
+
     def test_data_restore_clears_existing_files(self, tmp_path, container):
-        data_backup = _make_data_backup(tmp_path)
+        backup_file = self._make_real_data_backup(tmp_path)
         cfg = _cfg(tmp_path)
 
         data_dir = Path(container.data_dir)
@@ -128,13 +176,33 @@ class TestRestoreData:
             from core.restore_engine import run_restore
             opts = RestoreOptions(
                 restore_data=True, restore_compose=False,
-                backup_id_data=data_backup.name,
+                backup_id_data=backup_file.name,
             )
             result = run_restore(container, opts)
 
         assert result is True
-        # Old file should be gone
         assert not (data_dir / "old.db").exists()
+        assert (data_dir / "restored.db").exists()
+
+    def test_restores_from_safety_snapshot_dir(self, tmp_path, container):
+        """A backup that only exists in the snapshot dir must be restorable."""
+        backup_file = self._make_real_data_backup(tmp_path, dest="snapshots")
+        cfg = _cfg(tmp_path)
+        data_dir = Path(container.data_dir)
+
+        with patch("core.restore_engine.get_config", return_value=cfg), \
+             patch("core.restore_engine._take_safety_snapshot", return_value=[]), \
+             patch("core.restore_engine.dc.stop_container", return_value=True), \
+             patch("core.restore_engine.dc.start_container", return_value=True):
+            from core.restore_engine import run_restore
+            opts = RestoreOptions(
+                restore_data=True, restore_compose=False,
+                backup_id_data=backup_file.name,
+            )
+            result = run_restore(container, opts)
+
+        assert result is True
+        assert (data_dir / "restored.db").exists()
 
     def test_data_restore_fails_gracefully_on_missing_backup(self, tmp_path, container):
         cfg = _cfg(tmp_path)
@@ -176,7 +244,7 @@ class TestRestoreInternal:
         with patch("core.restore_engine.get_config", return_value=cfg), \
              patch("core.restore_engine.dc.restore_named_volume", restore_vol):
             from core.restore_engine import _restore_internal
-            result = _restore_internal(container, vol_files[0].name, lambda m, l: None)
+            result = _restore_internal(container, vol_files[0].name, lambda m, l="info": None)
 
         assert result is True
         assert restore_vol.call_count == 2
@@ -195,7 +263,7 @@ class TestRestoreInternal:
              patch("core.restore_engine.dc.restore_named_volume", restore_vol):
             from core.restore_engine import _restore_internal
             # Pass the SECOND file — should still find both
-            result = _restore_internal(container, vol_files[1].name, lambda m, l: None)
+            result = _restore_internal(container, vol_files[1].name, lambda m, l="info": None)
 
         assert result is True
         assert restore_vol.call_count == 2
@@ -210,7 +278,7 @@ class TestRestoreInternal:
             result = _restore_internal(
                 container,
                 "myapp_internal_vol-data_2026-07-06_02-00-00.tar.gz",
-                lambda m, l: None,
+                lambda m, l="info": None,
             )
 
         assert result is False
@@ -227,7 +295,7 @@ class TestRestoreInternal:
         with patch("core.restore_engine.get_config", return_value=cfg), \
              patch("core.restore_engine.dc.restore_named_volume", side_effect=restore_side_effect):
             from core.restore_engine import _restore_internal
-            result = _restore_internal(container, vol_files[0].name, lambda m, l: None)
+            result = _restore_internal(container, vol_files[0].name, lambda m, l="info": None)
 
         assert result is True  # at least one succeeded
 

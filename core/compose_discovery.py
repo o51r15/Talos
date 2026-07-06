@@ -13,8 +13,7 @@ as a group so the UI / CLI can prompt for all-or-single backup decisions.
 from __future__ import annotations
 import os
 import logging
-from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional
 
 from .models import ComposeInfo, ContainerInfo
 from .docker_client import get_client

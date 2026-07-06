@@ -4,6 +4,7 @@ Keeps the SDK import isolated so tests can mock it cleanly.
 """
 
 from __future__ import annotations
+import os
 import docker
 import logging
 from typing import Optional, List, Dict, Any
@@ -232,8 +233,6 @@ def _parse_container(
     base_data_dir: str,
 ) -> ContainerInfo:
     """Convert a docker SDK Container object to ContainerInfo."""
-    import os
-
     status_map = {
         "running": ContainerStatus.RUNNING,
         "stopped": ContainerStatus.STOPPED,
@@ -296,7 +295,6 @@ def _find_data_dir(container_name: str, base_data_dir: str) -> Optional[str]:
     Look for a directory under base_data_dir whose name matches
     the container name (case-insensitive). Returns full path or None.
     """
-    import os
     if not base_data_dir or not os.path.isdir(base_data_dir):
         return None
     for entry in os.scandir(base_data_dir):
