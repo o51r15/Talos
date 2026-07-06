@@ -164,12 +164,17 @@ container list sidebar + detail panel. Modals for backup/restore configuration.
 - [x] Retention / cleanup logic
 - [x] Auth hooks (stub, disabled)
 - [x] Dockerfile + docker-compose.yml
-- [ ] Compose siblings backup (include_compose_siblings full implementation)
-- [ ] Env var override for config values
+- [x] Compose siblings backup (include_compose_siblings full implementation)
+- [x] Env var override for config values
+- [x] Fix retention.py Optional import location
+- [x] Volume backup using named volume approach (backup_named_volume wiring)
+- [x] Scheduled backups (APScheduler, config-driven, lifespan-managed)
+- [x] Config API endpoint (GET /api/config, reload, schedule status)
+- [ ] Restore engine: wire named volume restore (list volumes from backup filenames)
 - [ ] Testing (unit + integration)
-- [ ] Fix retention.py Optional import location
-- [ ] Volume backup using named volume approach (backup_named_volume wiring)
 - [ ] First real-world test run
+- [ ] README: update with schedule config and env vars
+- [ ] Auth implementation (phase 2)
 
 ---
 
@@ -179,3 +184,4 @@ container list sidebar + detail panel. Modals for backup/restore configuration.
 |------|------|
 | 2026-07-06 | Brainstorm session complete, all core decisions locked, dev log created |
 | 2026-07-06 | Phase 1 scaffold complete — all modules written, web UI built, CLI functional |
+| 2026-07-06 | Phase 2 — bug fixes, compose siblings, named volume backup, env var overrides, scheduler, config API |
