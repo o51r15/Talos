@@ -13,7 +13,7 @@ import os
 import logging
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from .models import BackupRecord, BackupType
 from .config import get_config
@@ -106,4 +106,4 @@ def _clean_container_dir(
     return deleted
 
 
-from typing import Optional  # noqa: E402 — imported at bottom to avoid circular
+

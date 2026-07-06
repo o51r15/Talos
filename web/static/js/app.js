@@ -16,7 +16,10 @@ const API = {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(opts),
   }).then(r => r.json()),
-  job:         (id) => fetch(`/api/jobs/${id}`).then(r => r.json()),
+  job:          (id) => fetch(`/api/jobs/${id}`).then(r => r.json()),
+  config:       () => fetch('/api/config').then(r => r.json()),
+  scheduleStatus: () => fetch('/api/config/schedule').then(r => r.json()),
+  reloadConfig: () => fetch('/api/config/reload', { method: 'POST' }).then(r => r.json()),
 };
 
 // ── State ──────────────────────────────────────────────────────────────────────
@@ -32,7 +35,9 @@ let state = {
 // ── Boot ───────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   loadContainers();
+  loadSchedulerStatus();
   setInterval(refreshContainerStatuses, 15000);
+  setInterval(loadSchedulerStatus, 60000);
 
   document.getElementById('search').addEventListener('input', e => {
     state.filter = e.target.value.toLowerCase();
@@ -76,8 +81,25 @@ async function refreshContainerStatuses() {
 
 function updateHeaderMeta() {
   const running = state.containers.filter(c => c.status === 'running').length;
+  const schedEl = document.getElementById('sched-meta');
+  const schedText = schedEl ? schedEl.textContent : '';
   document.getElementById('header-meta').textContent =
-    `${state.containers.length} containers · ${running} running`;
+    `${state.containers.length} containers · ${running} running${schedText ? '  ·  ' + schedText : ''}`;
+}
+
+async function loadSchedulerStatus() {
+  try {
+    const s = await API.scheduleStatus();
+    const el = document.getElementById('sched-meta');
+    if (!el) return;
+    if (!s.enabled) {
+      el.textContent = '';
+      return;
+    }
+    const next = s.next_run ? relativeTime(s.next_run) : 'unknown';
+    el.textContent = `⏱ next backup ${next}`;
+    updateHeaderMeta();
+  } catch (_) {}
 }
 
 // ── Sidebar rendering ──────────────────────────────────────────────────────────

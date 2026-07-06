@@ -4,6 +4,7 @@ FastAPI application factory.
 
 from __future__ import annotations
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -12,11 +13,11 @@ from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 
 from .routes import containers, backups, restore, jobs
+from .routes.config_route import router as config_router
 from .middleware.auth import AuthMiddleware
 
 log = logging.getLogger(__name__)
 
-# Paths relative to project root
 _BASE = Path(__file__).parent.parent
 _STATIC_DIR = _BASE / "web" / "static"
 _TEMPLATE_DIR = _BASE / "web" / "templates"
@@ -24,16 +25,30 @@ _TEMPLATE_DIR = _BASE / "web" / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATE_DIR))
 
 
+# ── Lifespan ──────────────────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Start and stop background services alongside the FastAPI app."""
+    from core.scheduler import start_scheduler, stop_scheduler
+    start_scheduler()
+    yield
+    stop_scheduler()
+
+
+# ── App factory ───────────────────────────────────────────────────────────────
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Docker Backup Manager",
         description="Container backup and restore management",
-        version="0.1.0",
+        version="0.2.0",
         docs_url="/api/docs",
         redoc_url="/api/redoc",
+        lifespan=lifespan,
     )
 
-    # ── CORS (local dev — tighten for production) ──────────────────────────────
+    # ── CORS ──────────────────────────────────────────────────────────────────
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -42,18 +57,19 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # ── Auth middleware (stub — activates when config auth.enabled = true) ─────
+    # ── Auth middleware stub ───────────────────────────────────────────────────
     app.add_middleware(AuthMiddleware)
 
     # ── Static files ───────────────────────────────────────────────────────────
     if _STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
-    # ── API routers ────────────────────────────────────────────────────────────
-    app.include_router(containers.router, prefix="/api/containers", tags=["containers"])
-    app.include_router(backups.router, prefix="/api/backups", tags=["backups"])
-    app.include_router(restore.router, prefix="/api/restore", tags=["restore"])
-    app.include_router(jobs.router, prefix="/api/jobs", tags=["jobs"])
+    # ── Routers ────────────────────────────────────────────────────────────────
+    app.include_router(containers.router,  prefix="/api/containers", tags=["containers"])
+    app.include_router(backups.router,     prefix="/api/backups",    tags=["backups"])
+    app.include_router(restore.router,     prefix="/api/restore",    tags=["restore"])
+    app.include_router(jobs.router,        prefix="/api/jobs",       tags=["jobs"])
+    app.include_router(config_router,      prefix="/api/config",     tags=["config"])
 
     # ── UI catch-all ───────────────────────────────────────────────────────────
     from fastapi import Request
@@ -65,6 +81,11 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health():
-        return {"status": "ok"}
+        from core.scheduler import is_running, get_next_run
+        return {
+            "status": "ok",
+            "scheduler_running": is_running(),
+            "next_scheduled_backup": get_next_run(),
+        }
 
     return app

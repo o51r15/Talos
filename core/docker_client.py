@@ -141,47 +141,73 @@ def load_image(tar_path: str) -> Optional[str]:
         return None
 
 
-def backup_named_volume(volume_name: str, dest_path: str) -> bool:
+def backup_named_volume(volume_name: str, dest_dir: str, filename: str) -> bool:
     """
-    Backup a named Docker volume by running a busybox helper container.
-    The volume is mounted at /data inside the helper; tar is written to dest_path.
+    Backup a named Docker volume using a busybox helper container.
+    Volume is mounted read-only at /vol; dest_dir is mounted at /backup.
+    Output written to /backup/{filename}.
     """
     client = get_client()
     try:
         client.containers.run(
             image="busybox",
-            command=f"tar czf /backup/volume.tar.gz -C /data .",
+            command=f"tar czf /backup/{filename} -C /vol .",
             volumes={
-                volume_name: {"bind": "/data", "mode": "ro"},
-                str(dest_path).rsplit("/", 1)[0]: {"bind": "/backup", "mode": "rw"},
+                volume_name: {"bind": "/vol", "mode": "ro"},
+                dest_dir:    {"bind": "/backup", "mode": "rw"},
             },
             remove=True,
         )
-        log.info(f"Backed up volume {volume_name} to {dest_path}")
+        log.info(f"Backed up volume {volume_name} -> {dest_dir}/{filename}")
         return True
     except Exception as e:
         log.error(f"Error backing up volume {volume_name}: {e}")
         return False
 
 
-def restore_named_volume(volume_name: str, tar_path: str) -> bool:
-    """Restore a named volume from a tar produced by backup_named_volume."""
+def restore_named_volume(volume_name: str, backup_dir: str, filename: str) -> bool:
+    """
+    Restore a named volume from a tar produced by backup_named_volume.
+    backup_dir is mounted at /backup; volume mounted rw at /vol.
+    """
     client = get_client()
     try:
         client.containers.run(
             image="busybox",
-            command="tar xzf /backup/volume.tar.gz -C /data",
+            command=f"tar xzf /backup/{filename} -C /vol",
             volumes={
-                volume_name: {"bind": "/data", "mode": "rw"},
-                str(tar_path).rsplit("/", 1)[0]: {"bind": "/backup", "mode": "ro"},
+                volume_name: {"bind": "/vol", "mode": "rw"},
+                backup_dir:  {"bind": "/backup", "mode": "ro"},
             },
             remove=True,
         )
-        log.info(f"Restored volume {volume_name} from {tar_path}")
+        log.info(f"Restored volume {volume_name} from {backup_dir}/{filename}")
         return True
     except Exception as e:
         log.error(f"Error restoring volume {volume_name}: {e}")
         return False
+
+
+def list_named_volumes(container_name: str) -> List[Dict[str, Any]]:
+    """
+    Return named volume mounts for a container.
+    Each entry: {name, destination, read_write}
+    """
+    client = get_client()
+    try:
+        c = client.containers.get(container_name)
+        return [
+            {
+                "name": m["Name"],
+                "destination": m["Destination"],
+                "read_write": m.get("RW", True),
+            }
+            for m in c.attrs.get("Mounts", [])
+            if m.get("Type") == "volume" and m.get("Name")
+        ]
+    except Exception as e:
+        log.error(f"Error listing volumes for {container_name}: {e}")
+        return []
 
 
 # ── Raw inspect ────────────────────────────────────────────────────────────────

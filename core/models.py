@@ -22,9 +22,9 @@ class ContainerStatus(str, Enum):
 
 
 class BackupType(str, Enum):
-    DATA = "data"           # host-mounted data directory tar
-    COMPOSE = "compose"     # compose file(s) tar
-    INTERNAL = "internal"   # docker commit + save for named volumes / container layer
+    DATA = "data"
+    COMPOSE = "compose"
+    INTERNAL = "internal"   # docker named volumes (per-volume tars) or container layer
 
 
 class JobType(str, Enum):
@@ -47,7 +47,7 @@ class ComposeInfo(BaseModel):
     config_files: List[str] = Field(default_factory=list)
     working_dir: Optional[str] = None
     shared_containers: List[str] = Field(default_factory=list)
-    discovered: bool = False          # True if labels were found
+    discovered: bool = False
     discovery_method: str = "none"    # "labels" | "scan" | "none"
 
 
@@ -55,10 +55,10 @@ class ComposeInfo(BaseModel):
 
 class MountInfo(BaseModel):
     mount_type: str          # "bind" | "volume" | "tmpfs"
-    source: str              # host path (bind) or volume name (volume)
-    destination: str         # container path
+    source: str
+    destination: str
     read_write: bool = True
-    name: Optional[str] = None   # volume name if type == "volume"
+    name: Optional[str] = None
 
 
 # ── Container ─────────────────────────────────────────────────────────────────
@@ -70,12 +70,12 @@ class ContainerInfo(BaseModel):
     status: ContainerStatus
     image: str
     created: Optional[datetime] = None
-    data_dir: Optional[str] = None       # matched host data directory
+    data_dir: Optional[str] = None
     mounts: List[MountInfo] = Field(default_factory=list)
-    has_external_mounts: bool = False    # has bind mounts to host
-    has_internal_volumes: bool = False   # has named docker volumes
+    has_external_mounts: bool = False
+    has_internal_volumes: bool = False
     compose: Optional[ComposeInfo] = None
-    is_self: bool = False                # is this the backup manager container?
+    is_self: bool = False
     last_backup: Optional[datetime] = None
     backup_count: int = 0
 
@@ -83,7 +83,7 @@ class ContainerInfo(BaseModel):
 # ── Backup Record ─────────────────────────────────────────────────────────────
 
 class BackupRecord(BaseModel):
-    id: str                              # derived from filename
+    id: str
     container_name: str
     backup_type: BackupType
     timestamp: datetime
@@ -91,26 +91,47 @@ class BackupRecord(BaseModel):
     filepath: str
     size_bytes: int = 0
     size_human: str = ""
+    volume_name: Optional[str] = None      # populated for per-volume internal backups
     compose_project: Optional[str] = None
     is_restore_snapshot: bool = False
 
     @classmethod
     def from_path(cls, filepath: str) -> Optional["BackupRecord"]:
-        """Parse a backup record from a filename. Returns None if unparseable."""
+        """
+        Parse a BackupRecord from a filename. Returns None if unparseable.
+
+        Supported filename patterns:
+          {container}_data_{ts}.tar.gz
+          {container}_compose_{ts}.tar.gz
+          {container}_internal_{ts}.tar.gz         — future: docker-layer backup
+          {container}_internal_vol-{volname}_{ts}.tar.gz  — named volume backup
+        """
         import os
         import re
-        from datetime import datetime
 
         filename = os.path.basename(filepath)
         size = os.path.getsize(filepath) if os.path.exists(filepath) else 0
 
-        # Pattern: {name}_{type}_{YYYY-MM-DD_HH-MM-SS}.tar.gz  or  .tar
-        pattern = r'^(.+?)_(data|compose|internal)_(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})\.tar(?:\.gz)?$'
+        # Match type segment: data | compose | internal | internal_vol-{anything-without-underscore-digit-pairs}
+        # Timestamp is always YYYY-MM-DD_HH-MM-SS at the end before extension
+        pattern = (
+            r"^(.+?)"                               # container name (non-greedy)
+            r"_(data|compose|internal(?:_vol-[^_]+)?)"  # backup type + optional vol suffix
+            r"_(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})"  # timestamp
+            r"\.tar(?:\.gz)?$"
+        )
         match = re.match(pattern, filename)
         if not match:
             return None
 
-        container_name, btype, ts_str = match.groups()
+        container_name, raw_type, ts_str = match.groups()
+
+        # Extract volume name if present
+        volume_name: Optional[str] = None
+        if raw_type.startswith("internal_vol-"):
+            volume_name = raw_type[len("internal_vol-"):]
+        enum_type = "internal" if raw_type.startswith("internal") else raw_type
+
         try:
             timestamp = datetime.strptime(ts_str, "%Y-%m-%d_%H-%M-%S")
         except ValueError:
@@ -119,12 +140,13 @@ class BackupRecord(BaseModel):
         return cls(
             id=filename,
             container_name=container_name,
-            backup_type=BackupType(btype),
+            backup_type=BackupType(enum_type),
             timestamp=timestamp,
             filename=filename,
             filepath=filepath,
             size_bytes=size,
             size_human=_human_size(size),
+            volume_name=volume_name,
             is_restore_snapshot="restore_snapshot" in filepath,
         )
 
@@ -142,7 +164,7 @@ def _human_size(size_bytes: int) -> str:
 class BackupOptions(BaseModel):
     backup_data: bool = True
     backup_compose: bool = True
-    backup_internal: bool = False        # off by default — only when needed
+    backup_internal: bool = False
     include_compose_siblings: bool = False
 
 
@@ -150,8 +172,8 @@ class RestoreOptions(BaseModel):
     restore_data: bool = True
     restore_compose: bool = True
     restore_internal: bool = False
-    backup_id_data: Optional[str] = None      # filename of selected data backup
-    backup_id_compose: Optional[str] = None   # filename of selected compose backup
+    backup_id_data: Optional[str] = None
+    backup_id_compose: Optional[str] = None
     backup_id_internal: Optional[str] = None
 
 

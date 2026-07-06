@@ -3,20 +3,31 @@ Backup engine. Orchestrates stop → backup → restart for a single container.
 
 Backup types:
   DATA     — tar.gz of the host-mapped data directory
-  COMPOSE  — tar.gz of the discovered compose file(s)
-  INTERNAL — docker commit + docker save for named volumes / container layer
+  COMPOSE  — tar.gz of the discovered compose file(s) and .env
+  INTERNAL — per named-volume tar.gz archives via busybox helper
+
+Named volumes are backed up individually:
+  {container}_internal_vol-{volname}_{timestamp}.tar.gz
+
+Container-layer-only changes (no named volumes) are noted but not captured
+in this release — most real workloads use volumes for persistent data.
+
+Compose siblings: when options.include_compose_siblings is True, after backing
+up the primary container the engine fetches each sibling by name, enriches it
+with compose data, and recursively calls run_backup (with siblings=False to
+prevent loops). Sibling records are appended to the returned list.
 """
 
 from __future__ import annotations
 import os
 import tarfile
-import logging
 import shutil
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Callable
 
-from .models import BackupOptions, BackupRecord, BackupType, ContainerInfo
+from .models import BackupOptions, BackupRecord, ContainerInfo
 from .config import get_config
 from . import docker_client as dc
 
@@ -59,15 +70,16 @@ def run_backup(
 
     try:
         # ── DATA backup ───────────────────────────────────────────────────────
-        if options.backup_data and container.data_dir:
-            record = _backup_data_dir(container, dest_dir, timestamp, _log)
-            if record:
-                records.append(record)
-        elif options.backup_data:
-            _log(
-                f"No data directory found for {container.name} — skipping data backup",
-                "warning",
-            )
+        if options.backup_data:
+            if container.data_dir:
+                record = _backup_data_dir(container, dest_dir, timestamp, _log)
+                if record:
+                    records.append(record)
+            else:
+                _log(
+                    f"No data directory found for {container.name} — skipping data backup",
+                    "warning",
+                )
 
         # ── COMPOSE backup ────────────────────────────────────────────────────
         if options.backup_compose:
@@ -81,11 +93,21 @@ def run_backup(
                     "warning",
                 )
 
-        # ── INTERNAL backup ───────────────────────────────────────────────────
-        if options.backup_internal and container.has_internal_volumes:
-            record = _backup_internal(container, dest_dir, timestamp, _log)
-            if record:
-                records.append(record)
+        # ── INTERNAL (named volumes) backup ───────────────────────────────────
+        if options.backup_internal:
+            if container.has_internal_volumes:
+                vol_records = _backup_named_volumes(container, dest_dir, timestamp, _log)
+                records.extend(vol_records)
+                if not vol_records:
+                    _log(
+                        f"No named volumes could be backed up for {container.name}",
+                        "warning",
+                    )
+            else:
+                _log(
+                    f"No named volumes detected for {container.name} — skipping internal backup",
+                    "warning",
+                )
 
     finally:
         # ── Restart container ─────────────────────────────────────────────────
@@ -94,6 +116,15 @@ def run_backup(
             dc.start_container(container.name)
 
     _log(f"Backup complete for {container.name}: {len(records)} archive(s) created")
+
+    # ── Compose siblings ──────────────────────────────────────────────────────
+    # Done AFTER the primary container is restarted so siblings run independently.
+    if options.include_compose_siblings and container.compose and container.compose.shared_containers:
+        sibling_names = container.compose.shared_containers
+        _log(f"Backing up {len(sibling_names)} compose sibling(s): {', '.join(sibling_names)}")
+        sibling_opts = options.model_copy(update={"include_compose_siblings": False})
+        records.extend(_backup_siblings(sibling_names, sibling_opts, _log))
+
     return records
 
 
@@ -131,7 +162,6 @@ def _backup_compose(
 ) -> Optional[BackupRecord]:
     filename = f"{container.name}_compose_{timestamp}.tar.gz"
     dest_path = dest_dir / filename
-
     config_files = container.compose.config_files
     working_dir = container.compose.working_dir
 
@@ -140,18 +170,18 @@ def _backup_compose(
         with tarfile.open(dest_path, "w:gz") as tar:
             for cf in config_files:
                 if os.path.isfile(cf):
-                    # Store relative to working_dir if possible
                     if working_dir and cf.startswith(working_dir):
                         arcname = os.path.relpath(cf, working_dir)
                     else:
                         arcname = os.path.basename(cf)
                     tar.add(cf, arcname=arcname)
-            # Also include .env if present in working_dir
+
+            # Include .env if present alongside the compose file
             if working_dir:
                 env_file = os.path.join(working_dir, ".env")
                 if os.path.isfile(env_file):
                     tar.add(env_file, arcname=".env")
-                    _log("Included .env file in compose backup")
+                    _log("Included .env in compose backup")
 
         size = dest_path.stat().st_size
         _log(f"Compose backup saved: {filename} ({_human_size(size)})")
@@ -161,38 +191,78 @@ def _backup_compose(
         return None
 
 
-# ── Internal data backup ───────────────────────────────────────────────────────
+# ── Named volume backup ────────────────────────────────────────────────────────
 
-def _backup_internal(
+def _backup_named_volumes(
     container: ContainerInfo,
     dest_dir: Path,
     timestamp: str,
     _log: LogCallback,
-) -> Optional[BackupRecord]:
+) -> List[BackupRecord]:
     """
-    Capture internal container state via docker commit + docker save.
-    This covers named volumes and container-layer data not reflected on the host.
+    Back up each named volume individually using a busybox helper container.
+    Volume names are sanitised for use in filenames (/ and : replaced with -).
+    Returns one BackupRecord per volume successfully backed up.
     """
-    filename = f"{container.name}_internal_{timestamp}.tar"
-    dest_path = dest_dir / filename
-    tag = f"{container.name}-{timestamp}".replace(":", "-")
+    volumes = dc.list_named_volumes(container.name)
+    if not volumes:
+        _log(f"No named volumes found for {container.name}", "warning")
+        return []
 
-    _log(f"Committing container {container.name} to temporary image")
-    image_id = dc.commit_container(container.name, tag)
-    if not image_id:
-        _log("docker commit failed — skipping internal backup", "error")
-        return None
+    records: List[BackupRecord] = []
+    dest_dir_str = str(dest_dir)
 
-    try:
-        _log(f"Saving image to {filename}")
-        if not dc.save_image(image_id, str(dest_path)):
-            _log("docker save failed", "error")
-            return None
-        size = dest_path.stat().st_size
-        _log(f"Internal backup saved: {filename} ({_human_size(size)})")
-        return BackupRecord.from_path(str(dest_path))
-    finally:
-        dc.remove_image(image_id)
+    for vol in volumes:
+        vol_name = vol["name"]
+        safe_vol = vol_name.replace("/", "-").replace(":", "-")
+        filename = f"{container.name}_internal_vol-{safe_vol}_{timestamp}.tar.gz"
+
+        _log(f"Backing up named volume: {vol_name} -> {filename}")
+        ok = dc.backup_named_volume(vol_name, dest_dir_str, filename)
+        if ok:
+            dest_path = dest_dir / filename
+            record = BackupRecord.from_path(str(dest_path))
+            if record:
+                records.append(record)
+                size = dest_path.stat().st_size if dest_path.exists() else 0
+                _log(f"Volume backup saved: {filename} ({_human_size(size)})")
+        else:
+            _log(f"Failed to backup volume: {vol_name}", "error")
+
+    return records
+
+
+# ── Compose siblings ───────────────────────────────────────────────────────────
+
+def _backup_siblings(
+    sibling_names: List[str],
+    options: BackupOptions,
+    _log: LogCallback,
+) -> List[BackupRecord]:
+    """
+    Fetch, enrich, and backup each sibling container.
+    Errors per sibling are logged but don't abort the others.
+    """
+    from .compose_discovery import enrich_with_compose
+
+    all_records: List[BackupRecord] = []
+    for name in sibling_names:
+        sibling = dc.get_container(name)
+        if not sibling:
+            _log(f"Sibling not found, skipping: {name}", "warning")
+            continue
+        if sibling.is_self:
+            _log(f"Sibling is self, skipping: {name}", "warning")
+            continue
+        try:
+            [sibling] = enrich_with_compose([sibling])
+            _log(f"── Sibling: {name}")
+            records = run_backup(sibling, options, log_cb=_log)
+            all_records.extend(records)
+        except Exception as e:
+            _log(f"Sibling backup failed for {name}: {e}", "error")
+
+    return all_records
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
