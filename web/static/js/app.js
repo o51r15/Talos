@@ -275,9 +275,12 @@ function renderBackupGroup(title, records) {
 }
 
 function renderBackupRow(b, isSnapshot) {
+  const label = b.volume_name
+    ? `<span class="backup-type-badge internal" title="Volume: ${esc(b.volume_name)}">vol: ${esc(b.volume_name)}</span>`
+    : `<span class="backup-type-badge ${b.backup_type}">${b.backup_type}</span>`;
   return `
     <div class="backup-row ${isSnapshot ? 'snapshot' : ''}">
-      <span class="backup-type-badge ${b.backup_type}">${b.backup_type}</span>
+      ${label}
       <span class="backup-ts">${formatDate(b.timestamp)}</span>
       <span class="backup-size">${b.size_human}</span>
       <div class="backup-actions">
@@ -382,22 +385,55 @@ function _openRestoreModalInternal(preSelected) {
   const c = state.containers.find(c => c.name === state.selected);
   if (!c) return;
 
-  const dataBackups     = state.backups.filter(b => b.backup_type === 'data');
-  const composeBackups  = state.backups.filter(b => b.backup_type === 'compose');
+  const dataBackups    = state.backups.filter(b => b.backup_type === 'data');
+  const composeBackups = state.backups.filter(b => b.backup_type === 'compose');
   const internalBackups = state.backups.filter(b => b.backup_type === 'internal');
 
-  const backupList = (items, prefix) => items.length === 0
+  // Group internal backups by timestamp — each group is one snapshot set (all volumes)
+  const internalGroups = groupInternalByTimestamp(internalBackups);
+
+  // Simple selector for data / compose
+  const backupList = (items, prefix, preFile) => items.length === 0
     ? '<div style="color:var(--text-dim);font-size:12px;padding:6px 0">No backups of this type</div>'
     : `<div class="backup-select-list">
         ${items.map((b, i) => `
-          <label class="backup-select-item ${preSelected?.filename === b.filename ? 'selected' : ''}">
-            <input type="radio" name="${prefix}" value="${esc(b.filename)}" ${(preSelected?.filename === b.filename || i === 0) ? 'checked' : ''}>
+          <label class="backup-select-item ${preFile === b.filename ? 'selected' : ''}">
+            <input type="radio" name="${prefix}" value="${esc(b.filename)}"
+              ${(preFile === b.filename || i === 0) ? 'checked' : ''}>
             <span class="backup-type-badge ${b.backup_type}">${b.backup_type}</span>
             <span style="flex:1;font-family:var(--font-mono);font-size:12px">${formatDate(b.timestamp)}</span>
             <span style="color:var(--text-muted);font-size:11px">${b.size_human}</span>
           </label>
         `).join('')}
       </div>`;
+
+  // Grouped selector for internal (one radio per snapshot set)
+  const internalGroupList = (groups, preFile) => groups.length === 0
+    ? '<div style="color:var(--text-dim);font-size:12px;padding:6px 0">No internal backups found</div>'
+    : `<div class="backup-select-list">
+        ${groups.map((g, i) => {
+          const isSelected = preFile && g.records.some(r => r.filename === preFile);
+          const volNames = g.records.filter(r => r.volume_name).map(r => r.volume_name).join(', ');
+          const totalHuman = humanSize(g.totalSize);
+          return `
+          <label class="backup-select-item ${isSelected ? 'selected' : ''}">
+            <input type="radio" name="rs-internal-id" value="${esc(g.records[0].filename)}"
+              ${(isSelected || i === 0) ? 'checked' : ''}>
+            <span class="backup-type-badge internal">
+              ${g.records.length} vol${g.records.length !== 1 ? 's' : ''}
+            </span>
+            <span style="flex:1;font-family:var(--font-mono);font-size:12px">
+              ${formatDate(g.timestamp)}
+              ${volNames ? `<span style="color:var(--text-muted);font-size:10px;display:block;margin-top:1px">${esc(volNames)}</span>` : ''}
+            </span>
+            <span style="color:var(--text-muted);font-size:11px">${totalHuman}</span>
+          </label>`;
+        }).join('')}
+      </div>`;
+
+  const preDataFile    = preSelected?.backup_type === 'data'    ? preSelected.filename : null;
+  const preComposeFile = preSelected?.backup_type === 'compose' ? preSelected.filename : null;
+  const preInternalFile = preSelected?.backup_type === 'internal' ? preSelected.filename : null;
 
   showModal('Restore: ' + c.name, `
     <div class="alert alert-warning">
@@ -407,10 +443,10 @@ function _openRestoreModalInternal(preSelected) {
 
     <div class="form-group">
       <label class="form-check" style="margin-bottom:8px">
-        <input type="checkbox" id="rs-data" checked>
+        <input type="checkbox" id="rs-data" ${dataBackups.length === 0 ? 'disabled' : 'checked'}>
         <span class="form-check-label" style="font-weight:600">Restore Data Directory</span>
       </label>
-      ${backupList(dataBackups, 'rs-data-id')}
+      ${backupList(dataBackups, 'rs-data-id', preDataFile)}
     </div>
 
     <div class="form-group">
@@ -418,20 +454,40 @@ function _openRestoreModalInternal(preSelected) {
         <input type="checkbox" id="rs-compose" ${composeBackups.length === 0 ? 'disabled' : 'checked'}>
         <span class="form-check-label" style="font-weight:600">Restore Compose File(s)</span>
       </label>
-      ${backupList(composeBackups, 'rs-compose-id')}
+      ${backupList(composeBackups, 'rs-compose-id', preComposeFile)}
     </div>
 
     <div class="form-group">
       <label class="form-check" style="margin-bottom:8px">
-        <input type="checkbox" id="rs-internal" ${internalBackups.length === 0 ? 'disabled' : ''}>
-        <span class="form-check-label" style="font-weight:600">Restore Internal Data</span>
+        <input type="checkbox" id="rs-internal" ${internalGroups.length === 0 ? 'disabled' : ''}>
+        <span class="form-check-label" style="font-weight:600">Restore Internal Volumes</span>
       </label>
-      ${backupList(internalBackups, 'rs-internal-id')}
+      ${internalGroupList(internalGroups, preInternalFile)}
     </div>
   `, [
     { label: 'Cancel', cls: 'btn-ghost', action: closeModal },
     { label: '↺ Start Restore', cls: 'btn-danger', action: () => submitRestore(c) },
   ]);
+}
+
+// Group internal backups by timestamp — returns [{timestamp, records[], totalSize}]
+function groupInternalByTimestamp(records) {
+  const groups = new Map();
+  for (const b of records) {
+    const key = b.timestamp;
+    if (!groups.has(key)) groups.set(key, { timestamp: key, records: [], totalSize: 0 });
+    const g = groups.get(key);
+    g.records.push(b);
+    g.totalSize += b.size_bytes || 0;
+  }
+  return Array.from(groups.values()).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+}
+
+function humanSize(bytes) {
+  for (const [thresh, unit] of [[1e12,'TB'],[1e9,'GB'],[1e6,'MB'],[1e3,'KB']]) {
+    if (bytes >= thresh) return (bytes / thresh).toFixed(1) + ' ' + unit;
+  }
+  return bytes + ' B';
 }
 
 async function submitRestore(c) {
