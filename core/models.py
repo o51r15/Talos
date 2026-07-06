@@ -6,7 +6,7 @@ Pydantic models are used throughout — API responses, internal state, and CLI o
 from __future__ import annotations
 from pydantic import BaseModel, Field
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 
 
@@ -180,7 +180,7 @@ class RestoreOptions(BaseModel):
 # ── Jobs ──────────────────────────────────────────────────────────────────────
 
 class JobLog(BaseModel):
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     level: str = "info"    # "info" | "warning" | "error"
     message: str
 
@@ -197,4 +197,4 @@ class Job(BaseModel):
     error: Optional[str] = None
 
     def add_log(self, message: str, level: str = "info") -> None:
-        self.log.append(JobLog(timestamp=datetime.utcnow(), level=level, message=message))
+        self.log.append(JobLog(timestamp=datetime.now(timezone.utc), level=level, message=message))

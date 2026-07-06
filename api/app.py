@@ -7,7 +7,8 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
@@ -42,7 +43,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Docker Backup Manager",
         description="Container backup and restore management",
-        version="0.2.0",
+        version="0.3.0",
         docs_url="/api/docs",
         redoc_url="/api/redoc",
         lifespan=lifespan,
@@ -71,10 +72,7 @@ def create_app() -> FastAPI:
     app.include_router(jobs.router,        prefix="/api/jobs",       tags=["jobs"])
     app.include_router(config_router,      prefix="/api/config",     tags=["config"])
 
-    # ── UI catch-all ───────────────────────────────────────────────────────────
-    from fastapi import Request
-    from fastapi.responses import HTMLResponse
-
+    # ── UI ─────────────────────────────────────────────────────────────────────
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
         return templates.TemplateResponse("index.html", {"request": request})

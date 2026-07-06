@@ -13,7 +13,8 @@ services:
       - ./config.yaml:/app/config.yaml:ro
 
       # Host data root — must match base_data_dir in config
-      - /docker:/docker:ro
+      # rw required: restore engine writes restored files back to this path
+      - /docker:/docker:rw
 
       # Backup destination — must match backup_dest in config
       - /mnt/otherpool/backup/Docker:/backups

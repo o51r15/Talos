@@ -1,9 +1,6 @@
 FROM python:3.12-slim
-
-# Install Docker CLI (for docker commit/save/load operations)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    docker.io \
-    && rm -rf /var/lib/apt/lists/*
+# No OS packages needed — the Python docker SDK communicates with the
+# daemon via the socket directly and does not require the docker CLI binary.
 
 WORKDIR /app
 

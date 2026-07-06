@@ -12,7 +12,7 @@ from typing import List
 from core.models import ContainerInfo
 from core import docker_client as dc
 from core.compose_discovery import enrich_with_compose
-from core.backup_index import get_latest_backup, list_backups_for_container
+from core.backup_index import list_backups_for_container
 
 router = APIRouter()
 

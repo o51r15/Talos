@@ -26,7 +26,6 @@ log = logging.getLogger(__name__)
 _LABEL_PROJECT = "com.docker.compose.project"
 _LABEL_WORKING_DIR = "com.docker.compose.project.working_dir"
 _LABEL_CONFIG_FILES = "com.docker.compose.project.config_files"
-_LABEL_SERVICE = "com.docker.compose.service"
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────

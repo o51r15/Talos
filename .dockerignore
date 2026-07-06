@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Dev / test files — not needed in the image
+tests/
+requirements-dev.txt
+pytest.ini
+DEVLOG.md
+.github/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backup data — never ship these
+/backups/
+/restore_snapshot/
+
+# Git
+.git/
+.gitignore
+.gitattributes

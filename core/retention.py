@@ -42,11 +42,15 @@ def run_retention(container_name: Optional[str] = None) -> int:
         else None
     )
 
+    # Resolve once so the per-dir comparison is cheap and correct.
+    # Name-only comparison would incorrectly skip any container named
+    # the same as the last path component of restore_snapshot_dir.
+    snap_dir_resolved = Path(cfg.restore_snapshot_dir).resolve()
+
     for container_dir in dirs:
         if not container_dir.exists():
             continue
-        # Skip the restore_snapshot dir
-        if container_dir.name == Path(cfg.restore_snapshot_dir).name:
+        if container_dir.resolve() == snap_dir_resolved:
             continue
         deleted += _clean_container_dir(
             container_dir,

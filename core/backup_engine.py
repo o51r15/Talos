@@ -21,7 +21,6 @@ prevent loops). Sibling records are appended to the returned list.
 from __future__ import annotations
 import os
 import tarfile
-import shutil
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -224,8 +223,7 @@ def _backup_named_volumes(
             record = BackupRecord.from_path(str(dest_path))
             if record:
                 records.append(record)
-                size = dest_path.stat().st_size if dest_path.exists() else 0
-                _log(f"Volume backup saved: {filename} ({_human_size(size)})")
+                _log(f"Volume backup saved: {filename} ({record.size_human})")
         else:
             _log(f"Failed to backup volume: {vol_name}", "error")
 

@@ -86,8 +86,10 @@ def start_container(name: str) -> bool:
 
 def commit_container(name: str, tag: str) -> Optional[str]:
     """
-    Commit a container to a new image. Returns the image ID or None on failure.
-    Used to capture internal container state before save.
+    [LEGACY] Commit a container to a new image. Returns the image ID or None.
+
+    Not used by the current backup path (which uses per-volume busybox tars).
+    Retained for potential future use and for restore of old .tar image files.
     """
     client = get_client()
     try:
@@ -101,7 +103,7 @@ def commit_container(name: str, tag: str) -> Optional[str]:
 
 
 def save_image(image_id: str, dest_path: str) -> bool:
-    """Save a docker image to a tar file at dest_path."""
+    """[LEGACY] Save a docker image to a tar file at dest_path. See commit_container."""
     client = get_client()
     try:
         image = client.images.get(image_id)

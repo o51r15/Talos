@@ -117,17 +117,23 @@ def backup_cmd(ctx, container, data, compose, internal):
 
     targets = enrich_with_compose(targets)
 
+    def _log_cb(msg: str, level: str = "info") -> None:
+        style = {"warning": "yellow", "error": "red"}.get(level, "dim")
+        console.print(f"  [{style}]{msg}[/{style}]")
+
     for c in targets:
         if c.is_self:
             console.print(f"[dim]Skipping self: {c.name}[/dim]")
             continue
+
+        # Per-container options copy so group choice doesn't leak between containers
+        container_opts = options.model_copy()
 
         # Compose-group prompt
         if (
             options.backup_compose
             and c.compose
             and c.compose.shared_containers
-            and not options.include_compose_siblings
         ):
             siblings = c.compose.shared_containers
             console.print(
@@ -145,16 +151,14 @@ def backup_cmd(ctx, container, data, compose, internal):
             if choice == "cancel":
                 console.print(f"[dim]Skipped {c.name}[/dim]")
                 continue
-            options.include_compose_siblings = choice == "all"
+            container_opts = options.model_copy(
+                update={"include_compose_siblings": choice == "all"}
+            )
 
         console.rule(f"[bold]{c.name}[/bold]")
 
-        def _log_cb(msg: str, level: str = "info") -> None:
-            style = {"warning": "yellow", "error": "red"}.get(level, "dim")
-            console.print(f"  [{style}]{msg}[/{style}]")
-
         try:
-            records = run_backup(c, options, log_cb=_log_cb)
+            records = run_backup(c, container_opts, log_cb=_log_cb)
             run_retention(c.name)
             console.print(f"  [green]✓ {len(records)} archive(s) created[/green]")
         except Exception as e:

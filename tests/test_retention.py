@@ -119,13 +119,22 @@ class TestRunRetention:
         assert len(list(container_dir.iterdir())) == 4
 
     def test_skips_restore_snapshot_dir(self, tmp_path):
-        # If snapshot dir lives inside backup_dest, it should NOT be cleaned
+        """
+        Snapshot dir inside backup_dest must not be touched by retention.
+        Uses resolve()-based comparison so a container named 'restore_snapshot'
+        is not incorrectly excluded.
+        """
         snap_dir = tmp_path / "backups" / "restore_snapshot" / "myapp"
         snap_dir.mkdir(parents=True)
+
+        # Also create a real container dir to confirm it IS cleaned
+        container_dir = tmp_path / "backups" / "myapp"
+        container_dir.mkdir(parents=True)
 
         now = datetime(2026, 7, 6, 12, 0, 0)
         for i in range(10):
             _make_backup(snap_dir, "myapp", now - timedelta(days=i))
+            _make_backup(container_dir, "myapp", now - timedelta(days=i))
 
         from core.config import AppConfig, RetentionConfig
         cfg = AppConfig(
@@ -137,8 +146,10 @@ class TestRunRetention:
             from core.retention import run_retention
             deleted = run_retention()   # all containers
 
-        # Snapshots should be untouched
+        # Snapshots untouched
         assert len(list(snap_dir.iterdir())) == 10
+        # Real container backups trimmed to keep_last=2
+        assert len(list(container_dir.iterdir())) == 2
 
     def test_no_op_on_empty_directory(self, tmp_path):
         container_dir = tmp_path / "backups" / "myapp"

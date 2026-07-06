@@ -11,8 +11,8 @@ from __future__ import annotations
 import uuid
 import logging
 import concurrent.futures
-from datetime import datetime
-from typing import Dict, Optional, List, Callable
+from datetime import datetime, timezone
+from typing import Dict, Optional, List
 
 from .models import Job, JobStatus, JobType, ContainerInfo, BackupOptions, RestoreOptions
 
@@ -81,7 +81,7 @@ def _run_backup_job(job_id: str, container: ContainerInfo, options: BackupOption
 
     job = _jobs[job_id]
     job.status = JobStatus.RUNNING
-    job.started_at = datetime.utcnow()
+    job.started_at = datetime.now(timezone.utc)
     job.add_log(f"Starting backup for {container.name}")
 
     def _log_cb(msg: str, level: str = "info") -> None:
@@ -103,7 +103,7 @@ def _run_backup_job(job_id: str, container: ContainerInfo, options: BackupOption
         job.add_log(f"Backup failed: {e}", "error")
         log.exception(f"Backup job {job_id} failed")
     finally:
-        job.completed_at = datetime.utcnow()
+        job.completed_at = datetime.now(timezone.utc)
 
 
 def _run_restore_job(job_id: str, container: ContainerInfo, options: RestoreOptions) -> None:
@@ -111,7 +111,7 @@ def _run_restore_job(job_id: str, container: ContainerInfo, options: RestoreOpti
 
     job = _jobs[job_id]
     job.status = JobStatus.RUNNING
-    job.started_at = datetime.utcnow()
+    job.started_at = datetime.now(timezone.utc)
     job.add_log(f"Starting restore for {container.name}")
 
     def _log_cb(msg: str, level: str = "info") -> None:
@@ -128,4 +128,4 @@ def _run_restore_job(job_id: str, container: ContainerInfo, options: RestoreOpti
         job.add_log(f"Restore failed: {e}", "error")
         log.exception(f"Restore job {job_id} failed")
     finally:
-        job.completed_at = datetime.utcnow()
+        job.completed_at = datetime.now(timezone.utc)
