@@ -1,0 +1,9 @@
+# Normalize line endings to LF for all text files
+# (project runs on Linux — keep LF consistent regardless of dev OS)
+* text=auto eol=lf
+
+# Explicitly binary
+*.tar      binary
+*.tar.gz   binary
+*.png      binary
+*.jpg      binary

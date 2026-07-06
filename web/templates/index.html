@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Docker Backup Manager</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/main.css">
+</head>
+<body>
+
+<div class="layout">
+
+  <!-- Header -->
+  <header class="header">
+    <div class="header-logo">dbm<span>.</span>py</div>
+    <div class="header-meta" id="header-meta">Loading…</div>
+    <div class="header-actions">
+      <button class="btn btn-ghost btn-sm" id="btn-refresh" title="Refresh container list">↻ Refresh</button>
+      <button class="btn btn-primary btn-sm" id="btn-backup-all">↑ Backup All</button>
+    </div>
+  </header>
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div>
+        <span class="sidebar-title">Containers</span>
+        <span class="sidebar-count" id="sidebar-count">(…)</span>
+      </div>
+      <input
+        type="search"
+        class="sidebar-search"
+        id="search"
+        placeholder="Filter containers…"
+        autocomplete="off"
+        spellcheck="false"
+      >
+    </div>
+    <div class="container-list" id="container-list">
+      <div style="padding:20px 16px;color:var(--text-dim);font-family:var(--font-mono);font-size:12px">
+        Loading containers…
+      </div>
+    </div>
+  </aside>
+
+  <!-- Detail panel -->
+  <main class="detail" id="detail">
+    <div class="detail-empty">
+      <div class="detail-empty-icon">⬡</div>
+      <div>Select a container to view details</div>
+    </div>
+  </main>
+
+</div>
+
+<!-- Modal -->
+<div class="modal-overlay hidden" id="modal-overlay">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title"></span>
+      <button class="btn-icon" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body"></div>
+    <div class="modal-footer"></div>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div class="toast-container" id="toast-container"></div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+*.env.local
+
+# Config with real credentials (keep the example, not the live one)
+# config.yaml is committed as a template — override via mount in production
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backup data (never commit actual backups)
+/backups/
+/restore_snapshot/

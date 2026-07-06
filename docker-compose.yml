@@ -1,0 +1,28 @@
+services:
+  dbm:
+    build: .
+    container_name: docker-backup-manager
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      # Docker socket — required for container management
+      - /var/run/docker.sock:/var/run/docker.sock
+
+      # Config file
+      - ./config.yaml:/app/config.yaml:ro
+
+      # Host data root — must match base_data_dir in config
+      - /docker:/docker:ro
+
+      # Backup destination — must match backup_dest in config
+      - /mnt/otherpool/backup/Docker:/backups
+
+    environment:
+      # Set to this container's name so it skips itself
+      - SELF_CONTAINER_NAME=docker-backup-manager
+
+    # The container needs access to docker group for socket
+    # Adjust GID to match your host's docker group:  stat -c '%g' /var/run/docker.sock
+    group_add:
+      - "999"
