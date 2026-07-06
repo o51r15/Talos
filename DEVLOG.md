@@ -170,11 +170,16 @@ container list sidebar + detail panel. Modals for backup/restore configuration.
 - [x] Volume backup using named volume approach (backup_named_volume wiring)
 - [x] Scheduled backups (APScheduler, config-driven, lifespan-managed)
 - [x] Config API endpoint (GET /api/config, reload, schedule status)
-- [ ] Restore engine: wire named volume restore (list volumes from backup filenames)
-- [ ] Testing (unit + integration)
-- [ ] First real-world test run
-- [ ] README: update with schedule config and env vars
+- [x] Restore engine: named volume restore (timestamp-grouped, per-volume busybox)
+- [x] Testing (unit — 75 tests, pyflakes clean, all modules import)
+- [x] README: updated with schedule config, env vars, test docs
+- [x] Git repo + GHCR build workflow on push
+- [x] Two full top-down code review passes (static + suite-run)
+- [ ] Wire pytest into the GitHub Actions build (gate image on green tests)
+- [ ] First real-world test run on Linux host
 - [ ] Auth implementation (phase 2)
+- [ ] Persist job history across restarts (currently in-memory only)
+- [ ] Docker client auto-reconnect if daemon restarts
 
 ---
 
@@ -185,3 +190,94 @@ container list sidebar + detail panel. Modals for backup/restore configuration.
 | 2026-07-06 | Brainstorm session complete, all core decisions locked, dev log created |
 | 2026-07-06 | Phase 1 scaffold complete — all modules written, web UI built, CLI functional |
 | 2026-07-06 | Phase 2 — bug fixes, compose siblings, named volume backup, env var overrides, scheduler, config API |
+| 2026-07-06 | Phase 3 — restore engine rewrite (timestamp-grouped volume restore), 73-test suite, JS snapshot grouping, README rewrite |
+| 2026-07-06 | Git — repo pushed to github.com/o51r15/Talos; GHCR dev-container build workflow on push (amd64+arm64) |
+| 2026-07-06 | Review pass 1 (static) — :ro data mount, retention .name bug, CLI options mutation, datetime.utcnow deprecation, .dockerignore, dead code |
+| 2026-07-06 | Review pass 2 (ran suite+pyflakes) — data-restore wrong-dir bug, snapshot not restorable, list_jobs tz crash, cron crash, tarfile hardening; 75 tests green |
+
+---
+
+## Phase 3 — Restore Rewrite + Test Suite — 2026-07-06
+
+### Restore engine
+- `_restore_internal` rewritten: client passes any one file from a snapshot
+  set; engine finds ALL internal files sharing that timestamp and restores
+  each named volume via busybox. Legacy docker-save `.tar` files still handled.
+- Fixed `_take_safety_snapshot` calling the removed `_backup_internal`
+  (renamed to `_backup_named_volumes` in Phase 2).
+
+### Test suite (tests/)
+- 75 tests, no Docker daemon needed — all SDK calls mocked.
+- Coverage: models (filename parsing), config (YAML + env overrides),
+  retention (keep_last/max_age/type-independence/snapshot-exclusion),
+  backup_engine (data/compose/volumes/lifecycle/siblings/recursion-guard),
+  restore_engine (snapshot-first/abort/data-clear/volume-restore/purge).
+- `pytest.ini`, `requirements-dev.txt` added.
+
+### Web UI
+- Restore modal groups internal backups by timestamp into snapshot sets
+  (one radio per set, shows N volumes + names + total size).
+- Per-volume rows show `vol: {name}` badge.
+
+---
+
+## Review Pass 1 — Static Audit — 2026-07-06
+
+Read every file top-down. Found and fixed:
+- **docker-compose.yml**: `/docker` mounted `:ro` — broke every restore
+  (restore writes to base_data_dir). Changed to `:rw`.
+- **retention.py**: snapshot-dir exclusion used `.name` comparison — a
+  container literally named `restore_snapshot` would have its backups
+  silently skipped forever. Switched to `Path.resolve()`.
+- **cli.py**: `include_compose_siblings` mutated on the shared options object
+  inside the backup loop — a group choice leaked into every later container.
+  Now a per-container `model_copy()`.
+- **models.py / jobs.py**: `datetime.utcnow()` deprecated in 3.12; replaced
+  with `datetime.now(timezone.utc)`.
+- **Dockerfile**: dropped `docker.io` apt install (~200MB) — SDK uses the
+  socket, never the CLI binary.
+- Dead code: unused `shutil`, `get_latest_backup`, `_LABEL_SERVICE`,
+  `Callable`; redundant `stat()`; `_log_cb` redefined per loop iteration.
+- Added `.dockerignore` (was shipping tests/DEVLOG/.github into the image).
+
+---
+
+## Review Pass 2 — Ran the Suite — 2026-07-06
+
+This pass installed deps and actually ran pytest + pyflakes. That surfaced
+bugs static reading missed:
+
+**Critical:**
+- **restore_engine._restore_data**: extracted into `data_dir.parent` while
+  stripping the archive's top dir — renamed data dirs meant files landed in
+  the wrong place. Now extracts INTO `data_dir`. Regression test asserts
+  files land inside data_dir and NOT the parent.
+- **restore_engine**: backup IDs resolved only against `backup_dest`, so
+  safety snapshots the UI listed were NOT actually restorable. Added
+  `_resolve_backup_path()` checking both dirs; all three restore paths use it.
+- **jobs.list_jobs**: naive `datetime.min` fallback sorted against tz-aware
+  `started_at` → TypeError whenever a job lacked a start time. Fallback now
+  tz-aware.
+- **scheduler.start_scheduler**: invalid cron raised inside FastAPI lifespan
+  and killed web startup. Now caught + logged; server starts scheduler-off.
+
+**Hardening:**
+- tarfile extraction uses `filter='data'` on 3.12+ (blocks path traversal).
+- compose `working_dir` prefix match is now separator-terminated
+  (`/docker/app` no longer matches `/docker/app2`).
+- restore API rejects a type enabled with no backup selected (was a silent
+  no-op reporting success). Returns 400.
+- app.js: restore type enabled only if checked AND a backup selected;
+  surfaces FastAPI 400 detail; snapshots now offered in the picker.
+
+**Dead code (pyflakes):** unused `Path`/`Any` in compose_discovery, duplicated
+local `import os` in docker_client, two placeholder-less f-strings in cli.
+
+**Tests:** fixed 6 pre-existing test bugs only visible when run (wrong patch
+target for a local import; callback signatures missing level default).
+**Final: 75 passed, pyflakes clean, all modules import.**
+
+### Verified tooling state
+- Local env is Python 3.13; project targets 3.12+ (tarfile data filter guarded).
+- `rich` not installed locally so `cli.cli` import is unverified locally, but
+  all non-CLI modules import clean and the CLI is pure Click/Rich glue.
