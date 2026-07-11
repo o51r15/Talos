@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock, call
 
 from core.models import (
-    ContainerInfo, ContainerStatus, ComposeInfo,
+    ContainerInfo, ContainerStatus, ComposeInfo, DataSource,
     BackupOptions, BackupRecord, BackupType,
 )
 
@@ -31,6 +31,11 @@ def _make_data_dir(tmp_path, container_name="myapp") -> Path:
     return d
 
 
+def _sources_for(data_dir: Path):
+    """Build a bind-mount DataSource list for a data dir."""
+    return [DataSource(host_path=str(data_dir), destination="/data", method="bind")]
+
+
 @pytest.fixture
 def full_container(tmp_path):
     data_dir = _make_data_dir(tmp_path)
@@ -41,6 +46,7 @@ def full_container(tmp_path):
         status=ContainerStatus.RUNNING,
         image="myapp:latest",
         data_dir=str(data_dir),
+        data_sources=_sources_for(data_dir),
         has_external_mounts=True,
         has_internal_volumes=False,
         compose=ComposeInfo(
@@ -85,8 +91,9 @@ class TestDataBackup:
             names = tar.getnames()
         assert any("app.db" in n for n in names)
 
-    def test_skips_data_backup_when_no_data_dir(self, tmp_path, full_container):
+    def test_skips_data_backup_when_no_data_sources(self, tmp_path, full_container):
         full_container.data_dir = None
+        full_container.data_sources = []
         cfg = _cfg(tmp_path)
         opts = BackupOptions(backup_data=True, backup_compose=False, backup_internal=False)
 
@@ -98,7 +105,26 @@ class TestDataBackup:
             records = run_backup(full_container, opts, log_cb=lambda m, l: logs.append((m, l)))
 
         assert len(records) == 0
-        assert any("No data directory" in m for m, l in logs)
+        assert any("No host data directories" in m for m, l in logs)
+
+    def test_archive_has_manifest_and_slug_layout(self, tmp_path, full_container):
+        """New-format archive stores data under a dest-slug subdir + manifest."""
+        cfg = _cfg(tmp_path)
+        opts = BackupOptions(backup_data=True, backup_compose=False, backup_internal=False)
+
+        with patch("core.backup_engine.get_config", return_value=cfg), \
+             patch("core.backup_engine.dc.stop_container", return_value=True), \
+             patch("core.backup_engine.dc.start_container", return_value=True):
+            from core.backup_engine import run_backup
+            records = run_backup(full_container, opts)
+
+        with tarfile.open(records[0].filepath, "r:gz") as tar:
+            names = tar.getnames()
+        # Manifest present
+        assert "._sources.txt" in names
+        # Data stored under the destination slug ("/data" -> "data")
+        assert any(n.startswith("data/") or n == "data" for n in names)
+        assert any("app.db" in n for n in names)
 
 
 # ── Container lifecycle ───────────────────────────────────────────────────────
@@ -266,6 +292,7 @@ class TestComposeSiblings:
             status=ContainerStatus.RUNNING,
             image="sibling:latest",
             data_dir=str(tmp_path / "docker" / "sibling1"),
+            data_sources=_sources_for(tmp_path / "docker" / "sibling1"),
         )
 
         cfg = _cfg(tmp_path)
@@ -348,6 +375,7 @@ class TestComposeSiblings:
             status=ContainerStatus.RUNNING,
             image="sibling:latest",
             data_dir=str(tmp_path / "docker" / "sibling1"),
+            data_sources=_sources_for(tmp_path / "docker" / "sibling1"),
             compose=ComposeInfo(
                 project_name="mystack",
                 shared_containers=["myapp"],  # would cause recursion if not guarded

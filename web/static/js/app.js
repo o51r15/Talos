@@ -218,7 +218,7 @@ function renderDetail(c, backups, snapshots) {
     <!-- Metadata -->
     <div class="detail-meta">
       ${metaCell('Status', c.status)}
-      ${metaCell('Data Directory', c.data_dir || '—')}
+      ${dataSourcesCell(c)}
       ${metaCell('Compose Project', c.compose?.project_name || '—')}
       ${metaCell('Compose Siblings', c.compose?.shared_containers?.length
         ? c.compose.shared_containers.join(', ')
@@ -260,6 +260,26 @@ function metaCell(label, value) {
     <div class="meta-cell">
       <div class="meta-label">${esc(label)}</div>
       <div class="meta-value">${esc(String(value))}</div>
+    </div>
+  `;
+}
+
+function dataSourcesCell(c) {
+  const sources = c.data_sources || [];
+  let html;
+  if (sources.length === 0) {
+    html = c.has_internal_volumes
+      ? '<span style="color:var(--text-dim)">volumes only</span>'
+      : '<span style="color:var(--amber)">none found</span>';
+  } else {
+    html = sources.map(s =>
+      `<div style="font-family:var(--font-mono);font-size:11px;line-height:1.5" title="${esc(s.destination || '')}">${esc(s.host_path)} <span style="color:var(--text-dim)">(${esc(s.method)}${s.kind === 'file' ? ', file' : ''})</span></div>`
+    ).join('');
+  }
+  return `
+    <div class="meta-cell">
+      <div class="meta-label">Data Source${sources.length !== 1 ? 's' : ''}</div>
+      <div class="meta-value">${html}</div>
     </div>
   `;
 }
@@ -320,8 +340,8 @@ function openBackupModal() {
     <div class="form-group">
       <label class="form-label">What to back up</label>
       <label class="form-check">
-        <input type="checkbox" id="bk-data" checked ${!c.data_dir ? 'disabled' : ''}>
-        <span class="form-check-label">Data directory${!c.data_dir ? ' <span style="color:var(--text-dim)">(not found)</span>' : ''}</span>
+        <input type="checkbox" id="bk-data" checked ${!(c.data_sources?.length) ? 'disabled' : ''}>
+        <span class="form-check-label">Data (${c.data_sources?.length || 0} source${c.data_sources?.length !== 1 ? 's' : ''})${!(c.data_sources?.length) ? ' <span style="color:var(--text-dim)">(none found)</span>' : ''}</span>
       </label>
       <label class="form-check">
         <input type="checkbox" id="bk-compose" checked ${!c.compose?.config_files?.length ? 'disabled' : ''}>
@@ -352,6 +372,10 @@ async function submitBackup(c, hasSiblings) {
   closeModal();
   try {
     const job = await API.triggerBackup(c.name, opts);
+    if (job.detail) {  // FastAPI error envelope
+      showToast('error', 'Backup rejected', job.detail);
+      return;
+    }
     trackJob(job, c.name, 'backup');
   } catch (e) {
     showToast('error', 'Backup failed', e.message);
@@ -365,6 +389,10 @@ async function triggerBackupAll() {
       const job = await API.triggerBackup(c.name, {
         backup_data: true, backup_compose: true, backup_internal: false,
       });
+      if (job.detail) {
+        showToast('error', `Backup rejected: ${c.name}`, job.detail);
+        continue;
+      }
       trackJob(job, c.name, 'backup');
     } catch (e) {
       showToast('error', `Backup failed: ${c.name}`, e.message);
@@ -529,9 +557,25 @@ async function submitRestore(c) {
 function trackJob(job, containerName, type) {
   showToast('running', `${type === 'backup' ? '↑ Backing up' : '↺ Restoring'}: ${containerName}`, 'Job started…', job.id);
 
+  let pollFailures = 0;
   const interval = setInterval(async () => {
     try {
       const updated = await API.job(job.id);
+      // Job unknown to the server (e.g. server restarted — jobs are in-memory).
+      // Without this check the poll would run forever.
+      if (updated.detail) {
+        clearInterval(interval);
+        state.activeJobs.delete(job.id);
+        const el = document.getElementById(`toast-${job.id}`);
+        if (el) {
+          el.className = 'toast error';
+          el.querySelector('.toast-msg').textContent =
+            'Job status lost (server restarted?) — check backup history.';
+          setTimeout(() => el.remove(), 8000);
+        }
+        return;
+      }
+      pollFailures = 0;
       updateToast(job.id, updated, containerName, type);
       if (['success', 'failed', 'cancelled'].includes(updated.status)) {
         clearInterval(interval);
@@ -542,7 +586,13 @@ function trackJob(job, containerName, type) {
           if (state.selected === containerName) selectByName(containerName);
         }, 800);
       }
-    } catch (_) {}
+    } catch (_) {
+      // Network hiccup — tolerate a few, then stop leaking the interval
+      if (++pollFailures >= 10) {
+        clearInterval(interval);
+        state.activeJobs.delete(job.id);
+      }
+    }
   }, 2000);
 
   state.activeJobs.set(job.id, interval);
@@ -643,13 +693,16 @@ function formatDate(iso) {
 function relativeTime(iso) {
   if (!iso) return 'never';
   const diff = Date.now() - new Date(iso).getTime();
-  const m = Math.floor(diff / 60000);
-  if (m < 1)   return 'just now';
-  if (m < 60)  return `${m}m ago`;
+  const future = diff < 0;
+  const abs = Math.abs(diff);
+  const m = Math.floor(abs / 60000);
+  const fmt = (txt) => future ? `in ${txt}` : `${txt} ago`;
+  if (m < 1)   return future ? 'in <1m' : 'just now';
+  if (m < 60)  return fmt(`${m}m`);
   const h = Math.floor(m / 60);
-  if (h < 24)  return `${h}h ago`;
+  if (h < 24)  return fmt(`${h}h`);
   const d = Math.floor(h / 24);
-  return `${d}d ago`;
+  return fmt(`${d}d`);
 }
 
 // Close modal on overlay click

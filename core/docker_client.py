@@ -10,7 +10,7 @@ import logging
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
-from .models import ContainerInfo, ContainerStatus, MountInfo
+from .models import ContainerInfo, ContainerStatus, MountInfo, DataSource
 from .config import get_config
 
 log = logging.getLogger(__name__)
@@ -35,7 +35,10 @@ def list_containers(all_containers: bool = True) -> List[ContainerInfo]:
     results = []
 
     for c in client.containers.list(all=all_containers):
-        info = _parse_container(c, cfg.self_container_name, cfg.base_data_dir)
+        info = _parse_container(
+            c, cfg.self_container_name, cfg.base_data_dir,
+            cfg.extra_data_sources.get(c.name),
+        )
         results.append(info)
 
     return sorted(results, key=lambda x: x.name)
@@ -47,7 +50,10 @@ def get_container(name: str) -> Optional[ContainerInfo]:
     client = get_client()
     try:
         c = client.containers.get(name)
-        return _parse_container(c, cfg.self_container_name, cfg.base_data_dir)
+        return _parse_container(
+            c, cfg.self_container_name, cfg.base_data_dir,
+            cfg.extra_data_sources.get(c.name),
+        )
     except docker.errors.NotFound:
         return None
 
@@ -231,6 +237,7 @@ def _parse_container(
     c: Any,
     self_name: Optional[str],
     base_data_dir: str,
+    extra_paths: Optional[List[str]] = None,
 ) -> ContainerInfo:
     """Convert a docker SDK Container object to ContainerInfo."""
     status_map = {
@@ -244,7 +251,7 @@ def _parse_container(
     name = c.name
     status = status_map.get(c.status, ContainerStatus.UNKNOWN)
 
-    # Parse mounts
+    # Parse mounts + discover data sources (bind mounts are authoritative)
     mounts = []
     has_external = False
     has_internal_vol = False
@@ -263,8 +270,9 @@ def _parse_container(
         elif mi.mount_type == "volume":
             has_internal_vol = True
 
-    # Try to match a data directory under base_data_dir
-    data_dir = _find_data_dir(name, base_data_dir)
+    data_sources = _discover_data_sources(name, mounts, base_data_dir, extra_paths)
+    # Legacy single-path field = first discovered source, if any
+    data_dir = data_sources[0].host_path if data_sources else None
 
     # Parse created timestamp
     created_str = c.attrs.get("Created", "")
@@ -283,6 +291,7 @@ def _parse_container(
         image=c.image.tags[0] if c.image.tags else c.image.short_id,
         created=created,
         data_dir=data_dir,
+        data_sources=data_sources,
         mounts=mounts,
         has_external_mounts=has_external,
         has_internal_volumes=has_internal_vol,
@@ -290,10 +299,117 @@ def _parse_container(
     )
 
 
-def _find_data_dir(container_name: str, base_data_dir: str) -> Optional[str]:
+# Bind-mount sources that are almost never "data" — config/socket/time plumbing.
+# Matched against the host source path. Anything here is skipped as a data source.
+_BIND_NOISE_EXACT = {
+    "/etc/localtime",
+    "/etc/timezone",
+    "/etc/hosts",
+    "/etc/resolv.conf",
+    "/etc/hostname",
+    "/dev/null",
+}
+_BIND_NOISE_PREFIXES = (
+    "/var/run/docker.sock",
+    "/run/docker.sock",
+    "/sys",
+    "/proc",
+    "/dev/",
+)
+
+
+def _is_noise_bind(source: str) -> bool:
+    """True if a bind-mount source is plumbing, not real container data."""
+    if not source:
+        return True
+    if source in _BIND_NOISE_EXACT:
+        return True
+    if source.endswith("docker.sock"):
+        return True
+    for prefix in _BIND_NOISE_PREFIXES:
+        if source.startswith(prefix):
+            return True
+    return False
+
+
+def _discover_data_sources(
+    container_name: str,
+    mounts: List[MountInfo],
+    base_data_dir: str,
+    extra_paths: Optional[List[str]] = None,
+) -> List[DataSource]:
     """
-    Look for a directory under base_data_dir whose name matches
-    the container name (case-insensitive). Returns full path or None.
+    Determine which host paths hold this container's data.
+
+    Priority:
+      1. Bind mounts from docker inspect (authoritative). This is what makes
+         the tool work on ANY setup without renaming folders — the container
+         itself tells us where its data lives. Noise mounts (socket, localtime,
+         resolv.conf, etc.) are filtered out. Single-FILE bind mounts (configs,
+         certs) are captured too, not just directories.
+      2. Manual sources from config extra_data_sources (always additive).
+      3. If NOTHING was found above, fall back to matching a folder under
+         base_data_dir by container name (the simple/tidy setup case).
+
+    A bind source whose path is NOT currently visible from this process is
+    KEPT (not silently dropped): when the tool runs inside a container, host
+    paths are only visible if mounted at the same path. Dropping them would
+    hide real data from backups; keeping them lets preview/backup warn loudly.
+
+    Returns an ordered, de-duplicated list. Empty means "no host data found"
+    (the container may keep everything in named volumes — use internal backup).
+    """
+    sources: List[DataSource] = []
+    seen: set = set()
+
+    def _kind_of(path: str) -> str:
+        return "file" if os.path.isfile(path) else "dir"
+
+    # ── 1. Bind mounts (authoritative) ─────────────────────────────────────────
+    for m in mounts:
+        if m.mount_type != "bind":
+            continue
+        src = m.source
+        if _is_noise_bind(src):
+            continue
+        if src in seen:
+            continue
+        seen.add(src)
+        sources.append(DataSource(
+            host_path=src,
+            destination=m.destination,
+            method="bind",
+            kind=_kind_of(src),
+            read_write=m.read_write,
+        ))
+
+    # ── 2. Manual extras from config (always additive) ─────────────────────────
+    for path in (extra_paths or []):
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        sources.append(DataSource(
+            host_path=path,
+            destination=None,
+            method="manual",
+            kind=_kind_of(path),
+        ))
+
+    if sources:
+        return sources
+
+    # ── 3. Name-match fallback (only when nothing else was found) ──────────────
+    matched = _find_data_dir_by_name(container_name, base_data_dir)
+    if matched:
+        sources.append(DataSource(host_path=matched, destination=None, method="name"))
+
+    return sources
+
+
+def _find_data_dir_by_name(container_name: str, base_data_dir: str) -> Optional[str]:
+    """
+    Convenience fallback: a directory under base_data_dir whose name matches
+    the container (case-insensitive). Only used when no bind mount was found.
     """
     if not base_data_dir or not os.path.isdir(base_data_dir):
         return None

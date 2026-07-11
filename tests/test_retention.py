@@ -185,3 +185,42 @@ class TestRunRetention:
             deleted = run_retention()   # no container name = all
 
         assert deleted == 6   # 3 from app1 + 3 from app2
+
+    def test_missing_backup_root_no_error(self, tmp_path):
+        """First run before any backup exists: all-container mode must not crash."""
+        cfg = _config(tmp_path, keep_last=3)   # backup_dest never created
+        with patch("core.retention.get_config", return_value=cfg):
+            from core.retention import run_retention
+            deleted = run_retention()   # all-container mode iterates the root
+
+        assert deleted == 0
+
+    def test_internal_volumes_kept_per_volume(self, tmp_path):
+        """
+        keep_last must mean 'backup runs' for internal backups too.
+        3 volumes × 5 runs with keep_last=2 keeps 2 runs of EACH volume
+        (6 files), not 2 files total.
+        """
+        container_dir = tmp_path / "backups" / "myapp"
+        container_dir.mkdir(parents=True)
+
+        now = datetime(2026, 7, 6, 12, 0, 0)
+        vols = ("db", "cache", "media")
+        for i in range(5):                       # 5 backup runs
+            for v in vols:                       # 3 volumes per run
+                _make_backup(container_dir, "myapp",
+                             now - timedelta(days=i), f"internal_vol-{v}")
+
+        cfg = _config(tmp_path, keep_last=2)
+        with patch("core.retention.get_config", return_value=cfg):
+            from core.retention import run_retention
+            deleted = run_retention("myapp")
+
+        remaining = list(container_dir.iterdir())
+        # 2 runs × 3 volumes kept; 3 runs × 3 volumes deleted
+        assert len(remaining) == 6
+        assert deleted == 9
+        # Each volume retains exactly its own 2 newest files
+        for v in vols:
+            per_vol = [f for f in remaining if f"vol-{v}_" in f.name]
+            assert len(per_vol) == 2

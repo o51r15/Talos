@@ -61,6 +61,31 @@ class MountInfo(BaseModel):
     name: Optional[str] = None
 
 
+# ── Data source ───────────────────────────────────────────────────────────────
+
+class DataSource(BaseModel):
+    """
+    A host path (directory OR single file) that holds container data.
+
+    Sources are discovered in priority order:
+      "bind"      — a bind mount from docker inspect (authoritative; the
+                    container literally uses this host path). destination is
+                    the in-container path it maps to.
+      "name"      — a folder under base_data_dir whose name matches the
+                    container (convenience fallback for the simple case).
+      "manual"    — explicitly configured in config.yaml extra_data_sources.
+
+    kind is "dir" or "file" (bind-mounted single files are common: configs,
+    certs). A source whose host path is not currently visible is still kept —
+    backup warns and skips it rather than silently forgetting it exists.
+    """
+    host_path: str
+    destination: Optional[str] = None   # in-container path (bind mounts only)
+    method: str = "bind"                 # "bind" | "name" | "manual"
+    kind: str = "dir"                    # "dir" | "file"
+    read_write: bool = True
+
+
 # ── Container ─────────────────────────────────────────────────────────────────
 
 class ContainerInfo(BaseModel):
@@ -70,7 +95,8 @@ class ContainerInfo(BaseModel):
     status: ContainerStatus
     image: str
     created: Optional[datetime] = None
-    data_dir: Optional[str] = None
+    data_dir: Optional[str] = None          # legacy single-path (first data source)
+    data_sources: List[DataSource] = Field(default_factory=list)
     mounts: List[MountInfo] = Field(default_factory=list)
     has_external_mounts: bool = False
     has_internal_volumes: bool = False

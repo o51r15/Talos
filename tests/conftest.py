@@ -33,8 +33,8 @@ def minimal_config(tmp_path):
 
 @pytest.fixture
 def running_container(tmp_path):
-    """A ContainerInfo representing a running container with a data directory."""
-    from core.models import ContainerInfo, ContainerStatus
+    """A ContainerInfo representing a running container with a bind-mount data source."""
+    from core.models import ContainerInfo, ContainerStatus, DataSource, MountInfo
 
     data_dir = tmp_path / "docker" / "myapp"
     data_dir.mkdir(parents=True)
@@ -48,6 +48,12 @@ def running_container(tmp_path):
         status=ContainerStatus.RUNNING,
         image="myapp:latest",
         data_dir=str(data_dir),
+        data_sources=[
+            DataSource(host_path=str(data_dir), destination="/data", method="bind"),
+        ],
+        mounts=[
+            MountInfo(mount_type="bind", source=str(data_dir), destination="/data"),
+        ],
         has_external_mounts=True,
         has_internal_volumes=False,
     )

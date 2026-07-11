@@ -194,6 +194,8 @@ container list sidebar + detail panel. Modals for backup/restore configuration.
 | 2026-07-06 | Git — repo pushed to github.com/o51r15/Talos; GHCR dev-container build workflow on push (amd64+arm64) |
 | 2026-07-06 | Review pass 1 (static) — :ro data mount, retention .name bug, CLI options mutation, datetime.utcnow deprecation, .dockerignore, dead code |
 | 2026-07-06 | Review pass 2 (ran suite+pyflakes) — data-restore wrong-dir bug, snapshot not restorable, list_jobs tz crash, cron crash, tarfile hardening; 75 tests green |
+| 2026-07-06 | Phase 4 — bind-mount data discovery (DataSource model, manifest archives, moved-mount restore), dry-run + inspect + verbose CLI; 104 tests |
+| 2026-07-06 | Review pass 3 — file bind mounts as sources, non-visible paths warn loudly, per-volume retention, future relativeTime, poll leak, extra_data_sources config; 111 tests |
 
 ---
 
@@ -281,3 +283,162 @@ target for a local import; callback signatures missing level default).
 - Local env is Python 3.13; project targets 3.12+ (tarfile data filter guarded).
 - `rich` not installed locally so `cli.cli` import is unverified locally, but
   all non-CLI modules import clean and the CLI is pure Click/Rich glue.
+
+---
+
+## Phase 4 — Bind-Mount Data Discovery + Dry-Run — 2026-07-06
+
+### The problem
+Data-source discovery matched a folder under `base_data_dir` to a container
+by EXACT NAME only. Real-world setups (data at `/home/user/docker/<app>`,
+containers named by compose like `app-service-1`) would match NOTHING and
+silently skip data backup — the worst failure mode (looks like success).
+Expecting users to rename all their folders was unreasonable.
+
+### The fix: bind mounts are authoritative
+`_discover_data_sources()` now derives data directories from the container's
+BIND MOUNTS via docker inspect — the container literally tells us where its
+data lives on the host. Name-matching is kept only as a fallback for the
+simple/tidy case. Plumbing mounts (docker.sock, /etc/localtime, resolv.conf,
+/sys, /proc, /dev/) are filtered out via `_is_noise_bind()`.
+
+### Model changes
+- New `DataSource` model: host_path, destination (in-container path),
+  method ("bind" | "name" | "manual"), read_write.
+- `ContainerInfo.data_sources: List[DataSource]` added. `data_dir` kept as
+  a legacy alias = first source's host_path.
+
+### Backup format (multi-source)
+`_backup_data_sources()` archives ALL of a container's data sources into ONE
+data tar. Each source goes under a subdirectory slugged from its in-container
+destination (`/var/lib/postgresql/data` -> `var-lib-postgresql-data`). A
+manifest `._sources.txt` records slug -> host_path/destination/method.
+
+### Restore (manifest-aware + moved-mount handling)
+`_restore_data()` reads the manifest and restores each slug to its recorded
+host path — BUT matched to the container's CURRENT live bind mount for the
+same destination when available, so a data dir that MOVED since backup still
+restores to where the container reads from now. Old single-dir archives fall
+back to `_restore_data_legacy()`.
+
+### Dry-run + detailed logging (the other ask)
+- `core/preview.py`: `preview_backup()` — pure read-only inspection returning
+  a structured plan (data sources w/ file counts + sizes, compose files,
+  volumes, siblings, warnings). Never touches Docker, never stops anything.
+- CLI `backup --dry-run`: renders the plan for each target, shows exactly
+  what WOULD happen (which paths, how discovered, where archives go, warnings).
+- CLI `inspect <container>`: same report as a standalone command.
+- CLI global `-v/--verbose`: routes core logging through RichHandler at DEBUG.
+- CLI `backup --siblings/--no-siblings`: script-friendly, skips the prompt.
+- `list` now shows "Data Sources" column: count + discovery method
+  (e.g. "2 (bind)", "volumes only", or a yellow "none").
+
+### Tests
+- `tests/test_discovery.py` (25): noise filtering, bind-priority, name-match
+  fallback, the real-world "nothing matches" degrades-to-empty case.
+- `tests/test_roundtrip.py` (3): real backup->restore cycles including
+  multi-source and the moved-bind-mount case (restore follows the new path).
+- Updated backup/restore fixtures to populate `data_sources`.
+**Final: 104 passed, pyflakes clean, CLI imports + --help verified.**
+
+---
+
+## Review Pass 3 — Top-Down Audit of Phase 4 + Full Codebase — 2026-07-06
+
+Fresh-eyes read of every module with the Phase 4 redesign in place. This pass
+focused on files not scrutinised since the redesign (jobs, scheduler, API
+routes, web JS) plus a re-trace of the new discovery/backup/restore paths.
+All findings fixed in this pass; suite grew 104 → 111 tests, all green.
+
+### Bugs found and fixed
+
+**1. `relativeTime()` broke on future dates (app.js)**
+The scheduler header called it with `next_run` — a FUTURE timestamp. The
+negative diff floored below 1 minute, so the header permanently displayed
+"⏱ next backup just now" regardless of the actual schedule. Rewrote with
+signed-diff handling: past → "3h ago", future → "in 3h".
+
+**2. `trackJob()` polled dead jobs forever (app.js)**
+Jobs are in-memory server-side. After a server restart, polling a stale job
+ID returns FastAPI's `{detail: "...not found"}` envelope — `status` is
+undefined, never terminal, so the 2-second interval leaked forever. Now:
+a `detail` response stops polling and converts the toast to an explanatory
+error; 10 consecutive network failures also stop the interval.
+
+**3. Bind-mounted single FILES silently dropped (docker_client.py)**
+`_discover_data_sources` required `os.path.isdir()`, so the very common
+`./config.yml:/app/config.yml` single-file bind pattern was invisible to
+backups — silent data loss. Files are now first-class sources:
+- `DataSource` gained `kind: "dir" | "file"`.
+- Backup archives file sources (tar.add handles both) and records kind in
+  the manifest (now 5 columns: slug, host_path, destination, method, kind).
+- Restore handles `kind=file`: unlink target, extract the single member
+  into the target's parent under the correct filename.
+- Preview `_path_stats` reports single files (1 file, N bytes).
+
+**4. Non-visible bind paths silently discarded at discovery (docker_client.py)**
+When the tool runs AS a container, host paths are only visible if mounted
+into the manager at the same path. Discovery dropped invisible paths
+entirely — preview would claim "no sources found" instead of surfacing the
+real problem. Missing paths are now KEPT as sources; backup warns loudly
+and skips them ("mount this path into the manager at the same location"),
+and preview marks them (missing) with the same actionable warning. This
+converts silent data omission into a visible, explained condition.
+
+**5. Retention undercounted internal history (retention.py)**
+`keep_last` grouped files by TYPE. A container with 3 named volumes writes
+3 internal files per run, so keep_last=7 retained only ~2 runs of internal
+history while data/compose kept 7 runs each. Retention now groups internal
+records per volume (`internal:{volume_name}`), making keep_last consistently
+mean "backup runs" across all types. Regression test proves 3 vols × 5 runs
+with keep_last=2 keeps exactly 2 runs of each volume.
+
+**6. `run_retention()` crashed on first run (retention.py)**
+All-container mode called `iterdir()` on `backup_dest` before any backup
+had ever created it → FileNotFoundError. Guarded with an early return.
+
+**7. `DataSource.method="manual"` was documented but unimplemented**
+The model docstring promised config-defined sources; nothing read them.
+Implemented: new config key `extra_data_sources` (dict of container name →
+list of host paths). Discovery appends them with method="manual", additive
+to bind mounts, deduplicated, and they suppress the name-match fallback.
+Use case: capture host data the container doesn't bind-mount.
+
+### Smaller cleanups
+- cli.py: removed unused `header` param from `_render_preview`; preview
+  table gained a "Kind" column (dir/file).
+- app.js: detail panel now renders a "Data Sources" cell listing every
+  source with its discovery method and file/dir kind (was a single legacy
+  "Data Directory" path); backup modal enables/disables the data checkbox
+  from `data_sources.length` instead of legacy `data_dir` and shows the
+  source count; `submitBackup` and `triggerBackupAll` now check the FastAPI
+  error envelope (`job.detail`) exactly like `submitRestore` already did.
+
+### Verified healthy (no action needed)
+- jobs.py and scheduler.py both apply retention after successful backups —
+  CLI/web/scheduled paths are consistent.
+- restore route validates enabled-type-without-selection (400) before
+  submitting; snapshots endpoint present.
+- config env overrides, singleton reset fixture, compose discovery
+  label→scan fallback, retention snapshot-dir exclusion (resolve-based) —
+  all re-read, all correct.
+- Regex filename parsing handles container names containing `_data` etc.
+  via backtracking (verified by reasoning through "my_data_data_<ts>").
+
+### New/updated tests (111 total, all passing)
+- discovery: file bind mounts captured with kind=file; missing bind paths
+  KEPT not dropped; manual extras added with method=manual; manual deduped
+  against binds (28 discovery tests total).
+- roundtrip: file bind-mount backup→restore round-trip; missing source
+  warns + skips while visible sources still archive (5 roundtrip tests).
+- retention: per-volume keep_last; missing backup root no-crash (11 tests).
+**Final: 111 passed, pyflakes clean, CLI imports OK.**
+
+### Known remaining items (unchanged backlog)
+- First real-world run on the Linux host (highest value next step):
+  `python main.py list` → `inspect <container>` → `backup --dry-run` →
+  single-container real backup.
+- Busybox volume backup dest_dir uses the manager's own path — will need
+  host-path translation when running as a container (docker-in-docker
+  volume trap). Internal backup is off by default so first tests are safe.
+- Auth (phase 2), job history persistence, docker client auto-reconnect.

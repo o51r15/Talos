@@ -31,6 +31,10 @@ def run_retention(container_name: Optional[str] = None) -> int:
     backup_root = Path(cfg.backup_dest)
     deleted = 0
 
+    # First run: nothing to clean yet, and iterdir() on a missing root raises
+    if not backup_root.exists():
+        return 0
+
     if container_name:
         dirs = [backup_root / container_name]
     else:
@@ -69,18 +73,26 @@ def _clean_container_dir(
     cutoff: Optional[datetime],
 ) -> int:
     """Clean one container's backup directory."""
-    # Group files by backup type
-    by_type: Dict[str, List[BackupRecord]] = {t.value: [] for t in BackupType}
+    # Group files by retention key. For data/compose the key is the type.
+    # Internal backups are per-VOLUME files, so the key includes volume_name —
+    # otherwise a container with 3 volumes writes 3 "internal" files per run
+    # and keep_last=7 would retain only ~2 runs of internal history while
+    # data/compose retain 7 runs each. Grouping per volume makes keep_last
+    # consistently mean "backup runs" across all types.
+    by_key: Dict[str, List[BackupRecord]] = {}
 
     for f in container_dir.iterdir():
         if not f.is_file():
             continue
         record = BackupRecord.from_path(str(f))
         if record:
-            by_type.setdefault(record.backup_type.value, []).append(record)
+            key = record.backup_type.value
+            if record.backup_type == BackupType.INTERNAL and record.volume_name:
+                key = f"internal:{record.volume_name}"
+            by_key.setdefault(key, []).append(record)
 
     deleted = 0
-    for btype, records in by_type.items():
+    for key, records in by_key.items():
         if not records:
             continue
         # Sort newest first

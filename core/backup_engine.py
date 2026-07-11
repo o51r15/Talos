@@ -70,13 +70,15 @@ def run_backup(
     try:
         # ── DATA backup ───────────────────────────────────────────────────────
         if options.backup_data:
-            if container.data_dir:
-                record = _backup_data_dir(container, dest_dir, timestamp, _log)
+            if container.data_sources:
+                record = _backup_data_sources(container, dest_dir, timestamp, _log)
                 if record:
                     records.append(record)
             else:
                 _log(
-                    f"No data directory found for {container.name} — skipping data backup",
+                    f"No host data directories found for {container.name} "
+                    f"(no bind mounts, no name match) — skipping data backup. "
+                    f"If this container stores data in named volumes, enable internal backup.",
                     "warning",
                 )
 
@@ -129,25 +131,95 @@ def run_backup(
 
 # ── Data directory backup ──────────────────────────────────────────────────────
 
-def _backup_data_dir(
+def _dest_slug(destination: Optional[str], fallback: str) -> str:
+    """
+    Turn an in-container destination path into a safe archive subdirectory name.
+    '/var/lib/postgresql/data' -> 'var-lib-postgresql-data'.
+    Used so multiple bind mounts stay separated and remappable on restore.
+    """
+    if not destination:
+        return fallback
+    slug = destination.strip("/").replace("/", "-").replace(":", "-")
+    return slug or fallback
+
+
+def _backup_data_sources(
     container: ContainerInfo,
     dest_dir: Path,
     timestamp: str,
     _log: LogCallback,
 ) -> Optional[BackupRecord]:
+    """
+    Archive ALL of a container's host data sources into a single data tar.
+
+    Each source is stored under a subdirectory named from its in-container
+    destination path (or 'root-N' when unknown), so a multi-mount container
+    round-trips correctly and each piece can be mapped back on restore.
+
+    A manifest (._sources.txt) records slug -> host_path/destination/method.
+    """
+    import io
+
     filename = f"{container.name}_data_{timestamp}.tar.gz"
     dest_path = dest_dir / filename
+    sources = container.data_sources
 
-    _log(f"Compressing data directory: {container.data_dir}")
+    _log(f"Archiving {len(sources)} data source(s) for {container.name}:")
+    for s in sources:
+        tag = f" ({s.method})" if s.method != "bind" else ""
+        _log(f"  • {s.host_path} → {s.destination or '(name match)'}{tag}")
+
     try:
-        data_path = Path(container.data_dir)
+        manifest_lines: List[str] = []
+        used_slugs: set = set()
         with tarfile.open(dest_path, "w:gz") as tar:
-            tar.add(data_path, arcname=data_path.name)
+            for i, src in enumerate(sources):
+                host_path = Path(src.host_path)
+                if not host_path.exists():
+                    _log(
+                        f"  Source path not visible from this process, SKIPPING: {host_path}. "
+                        f"If running as a container, mount this path into the manager "
+                        f"at the same location.",
+                        "warning",
+                    )
+                    continue
+
+                slug = _dest_slug(src.destination, fallback=f"root-{i}")
+                base_slug = slug
+                n = 1
+                while slug in used_slugs:
+                    slug = f"{base_slug}-{n}"
+                    n += 1
+                used_slugs.add(slug)
+
+                kind = "file" if host_path.is_file() else "dir"
+                tar.add(str(host_path), arcname=slug)
+                manifest_lines.append(
+                    f"{slug}\t{src.host_path}\t{src.destination or ''}\t{src.method}\t{kind}"
+                )
+
+            if not manifest_lines:
+                _log("  No visible source paths to archive", "warning")
+                tar.close()
+                if dest_path.exists():
+                    dest_path.unlink()
+                return None
+
+            manifest_data = ("\n".join(manifest_lines) + "\n").encode()
+            info = tarfile.TarInfo(name="._sources.txt")
+            info.size = len(manifest_data)
+            tar.addfile(info, io.BytesIO(manifest_data))
+
         size = dest_path.stat().st_size
         _log(f"Data backup saved: {filename} ({_human_size(size)})")
         return BackupRecord.from_path(str(dest_path))
     except Exception as e:
         _log(f"Data backup failed: {e}", "error")
+        if dest_path.exists():
+            try:
+                dest_path.unlink()
+            except OSError:
+                pass
         return None
 
 

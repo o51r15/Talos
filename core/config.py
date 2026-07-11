@@ -19,7 +19,7 @@ import os
 import yaml
 from pathlib import Path
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 DEFAULT_PATHS = [
     os.environ.get("CONFIG_PATH", ""),
@@ -60,6 +60,14 @@ class AppConfig(BaseModel):
     compose_scan_paths: List[str] = Field(
         default_factory=lambda: ["/docker", "/opt/docker", "/home"]
     )
+    # Extra host paths to back up per container, beyond what bind mounts
+    # reveal. Keyed by container name. Discovery adds these with
+    # method="manual" — useful for data the container doesn't mount but
+    # you still want captured alongside it.
+    #   extra_data_sources:
+    #     grocy:
+    #       - /home/user/docker/grocy-extras
+    extra_data_sources: Dict[str, List[str]] = Field(default_factory=dict)
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
     purge_snapshot_on_success: bool = False

@@ -9,7 +9,7 @@ from datetime import datetime
 from unittest.mock import patch, MagicMock, call
 
 from core.models import (
-    ContainerInfo, ContainerStatus, ComposeInfo,
+    ContainerInfo, ContainerStatus, ComposeInfo, DataSource,
     RestoreOptions, BackupOptions, BackupRecord, BackupType,
 )
 
@@ -60,6 +60,9 @@ def container(tmp_path):
         status=ContainerStatus.RUNNING,
         image="myapp:latest",
         data_dir=str(data_dir),
+        data_sources=[
+            DataSource(host_path=str(data_dir), destination="/data", method="bind"),
+        ],
         compose=ComposeInfo(
             project_name="mystack",
             config_files=[],

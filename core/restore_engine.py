@@ -160,7 +160,7 @@ def _take_safety_snapshot(
     snapshot_dir.mkdir(parents=True, exist_ok=True)
 
     from .backup_engine import (
-        _backup_data_dir,
+        _backup_data_sources,
         _backup_compose,
         _backup_named_volumes,
     )
@@ -168,8 +168,8 @@ def _take_safety_snapshot(
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     records: List[BackupRecord] = []
 
-    if options.backup_data and container.data_dir:
-        r = _backup_data_dir(container, snapshot_dir, timestamp, _log)
+    if options.backup_data and container.data_sources:
+        r = _backup_data_sources(container, snapshot_dir, timestamp, _log)
         if r:
             r.is_restore_snapshot = True
             records.append(r)
@@ -191,53 +191,151 @@ def _take_safety_snapshot(
 
 # ── Restore: data directory ────────────────────────────────────────────────────
 
-def _restore_data(
-    container: ContainerInfo,
-    backup_id: str,
-    _log: LogCallback,
-) -> bool:
-    backup_path = _resolve_backup_path(container.name, backup_id)
-    if not backup_path:
-        _log(f"Backup file not found: {backup_id}", "error")
-        return False
+def _read_manifest(tar: tarfile.TarFile):
+    """
+    Read ._sources.txt from a data archive if present.
+    Returns {slug: {host_path, destination, method, kind}} or None (legacy).
+    """
+    try:
+        member = tar.getmember("._sources.txt")
+    except KeyError:
+        return None
+    f = tar.extractfile(member)
+    if not f:
+        return None
+    mapping = {}
+    for line in f.read().decode().splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            mapping[parts[0]] = {
+                "host_path": parts[1],
+                "destination": parts[2] if len(parts) > 2 else "",
+                "method": parts[3] if len(parts) > 3 else "bind",
+                "kind": parts[4] if len(parts) > 4 else "dir",
+            }
+    return mapping
 
-    if not container.data_dir:
-        _log("No data directory known for this container — cannot restore data", "error")
-        return False
 
-    data_dir = Path(container.data_dir)
-    if data_dir.exists():
-        _log(f"Clearing data directory: {data_dir}")
-        for item in data_dir.iterdir():
+def _clear_dir(path: Path, _log: LogCallback) -> None:
+    """Empty a directory's contents (create it if missing)."""
+    if path.exists():
+        _log(f"Clearing: {path}")
+        for item in path.iterdir():
             if item.is_dir():
                 shutil.rmtree(item)
             else:
                 item.unlink()
     else:
-        _log(f"Data directory missing, creating: {data_dir}", "warning")
-        data_dir.mkdir(parents=True, exist_ok=True)
+        _log(f"Creating missing directory: {path}", "warning")
+        path.mkdir(parents=True, exist_ok=True)
 
-    _log(f"Extracting {backup_id} -> {data_dir}")
+
+def _restore_data(
+    container: ContainerInfo,
+    backup_id: str,
+    _log: LogCallback,
+) -> bool:
+    """
+    Restore a data archive. Supports two formats:
+      NEW: archive has ._sources.txt mapping slug subdirs to host paths.
+           Each slug is restored to its recorded host path — matched to the
+           container's CURRENT live bind mount for the same destination when
+           available, so a moved data dir still restores to the right place.
+      LEGACY: single top-level dir; extracted into the first data source.
+    """
+    backup_path = _resolve_backup_path(container.name, backup_id)
+    if not backup_path:
+        _log(f"Backup file not found: {backup_id}", "error")
+        return False
+
+    live_by_dest = {
+        s.destination: s.host_path
+        for s in container.data_sources
+        if s.destination
+    }
+
     try:
         with tarfile.open(backup_path, "r:gz") as tar:
-            for member in tar.getmembers():
-                parts = Path(member.name).parts
-                if len(parts) <= 1:
-                    # Top-level directory entry itself — nothing to extract.
-                    # A bare file at archive root keeps its name as-is.
-                    if member.isdir():
+            manifest = _read_manifest(tar)
+
+            if manifest is None:
+                return _restore_data_legacy(container, tar, _log)
+
+            members = tar.getmembers()
+            ok_any = False
+            for slug, meta in manifest.items():
+                dest = meta.get("destination") or ""
+                target = live_by_dest.get(dest) or meta.get("host_path")
+                if not target:
+                    _log(f"  No target path for '{slug}' — skipping", "warning")
+                    continue
+
+                target_path = Path(target)
+
+                # ── Single-file source ────────────────────────────────────────
+                if meta.get("kind") == "file":
+                    file_member = next((m for m in members if m.name == slug), None)
+                    if not file_member:
+                        _log(f"  Archive member missing for file '{slug}'", "warning")
                         continue
-                else:
-                    # Strip the leading directory (the data dir's name at
-                    # backup time) so contents extract INTO data_dir even
-                    # if the directory has been renamed since the backup.
-                    member.name = str(Path(*parts[1:]))
-                tar.extract(member, path=data_dir, **_EXTRACT_KWARGS)
-        _log("Data extraction complete")
-        return True
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                    if target_path.exists():
+                        target_path.unlink()
+                    file_member.name = target_path.name
+                    tar.extract(file_member, path=target_path.parent, **_EXTRACT_KWARGS)
+                    _log(f"  Restored file '{slug}' -> {target_path}")
+                    ok_any = True
+                    continue
+
+                # ── Directory source ──────────────────────────────────────────
+                _clear_dir(target_path, _log)
+
+                prefix = slug + "/"
+                extracted = 0
+                for member in members:
+                    if member.name == slug or not member.name.startswith(prefix):
+                        continue
+                    rel = member.name[len(prefix):]
+                    if not rel:
+                        continue
+                    member.name = rel
+                    tar.extract(member, path=target_path, **_EXTRACT_KWARGS)
+                    extracted += 1
+
+                _log(f"  Restored '{slug}' -> {target_path} ({extracted} entries)")
+                ok_any = True
+
+            if ok_any:
+                _log("Data extraction complete")
+            return ok_any
+
     except Exception as e:
         _log(f"Extraction failed: {e}", "error")
         return False
+
+
+def _restore_data_legacy(container: ContainerInfo, tar: tarfile.TarFile, _log: LogCallback) -> bool:
+    """Restore an old-format archive (single top-level dir) into first source."""
+    if not container.data_sources:
+        _log("No data source known — cannot restore legacy archive", "error")
+        return False
+
+    data_dir = Path(container.data_sources[0].host_path)
+    _clear_dir(data_dir, _log)
+    _log(f"Extracting (legacy format) -> {data_dir}")
+
+    for member in tar.getmembers():
+        if member.name == "._sources.txt":
+            continue
+        parts = Path(member.name).parts
+        if len(parts) <= 1:
+            if member.isdir():
+                continue
+        else:
+            member.name = str(Path(*parts[1:]))
+        tar.extract(member, path=data_dir, **_EXTRACT_KWARGS)
+    _log("Data extraction complete")
+    return True
 
 
 # ── Restore: compose files ─────────────────────────────────────────────────────

@@ -10,28 +10,49 @@ Commands:
 
 from __future__ import annotations
 import sys
+import logging
 import click
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 from rich.prompt import Prompt, Confirm
+from rich.logging import RichHandler
 from rich import box
 from typing import Optional
 
 console = Console()
 
 
+def _setup_logging(verbose: bool) -> None:
+    """Route core-module logging to the console. -v enables DEBUG."""
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(message)s",
+        datefmt="[%X]",
+        handlers=[RichHandler(console=console, rich_tracebacks=True,
+                              show_path=verbose, markup=False)],
+    )
+    # Quiet noisy third-party loggers unless we're in verbose mode
+    if not verbose:
+        logging.getLogger("docker").setLevel(logging.WARNING)
+        logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+
 # ── CLI root ───────────────────────────────────────────────────────────────────
 
 @click.group()
 @click.option("--config", default=None, help="Path to config.yaml")
+@click.option("--verbose", "-v", is_flag=True, help="Verbose (DEBUG) logging")
 @click.pass_context
-def cli(ctx: click.Context, config: Optional[str]):
+def cli(ctx: click.Context, config: Optional[str], verbose: bool):
     """Docker Backup Manager — CLI"""
     from core.config import load_config
+    _setup_logging(verbose)
     ctx.ensure_object(dict)
     cfg = load_config(config)
     ctx.obj["config"] = cfg
+    ctx.obj["verbose"] = verbose
 
 
 # ── list ───────────────────────────────────────────────────────────────────────
@@ -58,7 +79,7 @@ def list_cmd(ctx):
     table.add_column("Compose Project")
     table.add_column("Backups", justify="right")
     table.add_column("Last Backup")
-    table.add_column("Data Dir")
+    table.add_column("Data Sources")
 
     for c in containers:
         status_style = {
@@ -73,13 +94,24 @@ def list_cmd(ctx):
         project = c.compose.project_name if c.compose else "-"
         self_flag = " [dim](self)[/dim]" if c.is_self else ""
 
+        # Summarise data sources and how they were found
+        if c.data_sources:
+            methods = {s.method for s in c.data_sources}
+            n = len(c.data_sources)
+            via = "/".join(sorted(methods))
+            data_col = f"{n} ({via})"
+        elif c.has_internal_volumes:
+            data_col = "[dim]volumes only[/dim]"
+        else:
+            data_col = "[yellow]none[/yellow]"
+
         table.add_row(
             f"{c.name}{self_flag}",
             status_style,
             project or "-",
             str(len(records)),
             last_backup,
-            c.data_dir or "[dim]none[/dim]",
+            data_col,
         )
 
     console.print(table)
@@ -92,8 +124,12 @@ def list_cmd(ctx):
 @click.option("--data/--no-data", default=True, help="Backup data directory")
 @click.option("--compose/--no-compose", default=True, help="Backup compose files")
 @click.option("--internal/--no-internal", default=False, help="Backup internal volumes")
+@click.option("--dry-run", is_flag=True,
+              help="Show what WOULD be backed up without stopping or writing anything")
+@click.option("--siblings/--no-siblings", default=False,
+              help="Include compose siblings without prompting (useful for scripts)")
 @click.pass_context
-def backup_cmd(ctx, container, data, compose, internal):
+def backup_cmd(ctx, container, data, compose, internal, dry_run, siblings):
     """Back up one or all containers."""
     from core import docker_client as dc
     from core.compose_discovery import enrich_with_compose
@@ -105,6 +141,7 @@ def backup_cmd(ctx, container, data, compose, internal):
         backup_data=data,
         backup_compose=compose,
         backup_internal=internal,
+        include_compose_siblings=siblings,
     )
 
     if container:
@@ -116,6 +153,22 @@ def backup_cmd(ctx, container, data, compose, internal):
         targets = dc.list_containers(all_containers=True)
 
     targets = enrich_with_compose(targets)
+
+    # ── DRY RUN ────────────────────────────────────────────────────────────────
+    if dry_run:
+        from core.preview import preview_backup
+        console.print(Panel(
+            "[bold yellow]DRY RUN[/bold yellow] — no containers will be stopped, "
+            "no files will be written.",
+            expand=False,
+        ))
+        for c in targets:
+            if c.is_self:
+                console.print(f"[dim]Would skip self: {c.name}[/dim]")
+                continue
+            plan = preview_backup(c, options)
+            _render_preview(plan)
+        return
 
     def _log_cb(msg: str, level: str = "info") -> None:
         style = {"warning": "yellow", "error": "red"}.get(level, "dim")
@@ -129,17 +182,18 @@ def backup_cmd(ctx, container, data, compose, internal):
         # Per-container options copy so group choice doesn't leak between containers
         container_opts = options.model_copy()
 
-        # Compose-group prompt
+        # Compose-group prompt — skipped when --siblings/--no-siblings was explicit
         if (
             options.backup_compose
             and c.compose
             and c.compose.shared_containers
+            and not siblings
         ):
-            siblings = c.compose.shared_containers
+            sibling_names = c.compose.shared_containers
             console.print(
                 Panel(
                     f"[yellow]'{c.name}'[/yellow] shares a compose stack with "
-                    f"{len(siblings)} other container(s): {', '.join(siblings)}",
+                    f"{len(sibling_names)} other container(s): {', '.join(sibling_names)}",
                     title="Compose Group Detected",
                 )
             )
@@ -287,7 +341,105 @@ def web_cmd(ctx):
     uvicorn.run(app, host=cfg.web_host, port=cfg.web_port)
 
 
+# ── inspect ────────────────────────────────────────────────────────────────────
+
+@cli.command("inspect")
+@click.argument("container")
+@click.option("--internal/--no-internal", default=True,
+              help="Include named-volume detection in the report")
+@click.pass_context
+def inspect_cmd(ctx, container, internal):
+    """Show how the tool sees a container: data sources, compose, volumes."""
+    from core import docker_client as dc
+    from core.compose_discovery import enrich_with_compose
+    from core.models import BackupOptions
+    from core.preview import preview_backup
+
+    c = dc.get_container(container)
+    if not c:
+        console.print(f"[red]Container '{container}' not found[/red]")
+        sys.exit(1)
+    c = enrich_with_compose([c])[0]
+
+    options = BackupOptions(backup_data=True, backup_compose=True, backup_internal=internal)
+    plan = preview_backup(c, options)
+    _render_preview(plan)
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
+
+def _render_preview(plan: dict) -> None:
+    """Render a preview_backup() plan dict to the console."""
+    stop_note = "[yellow]will STOP then restart[/yellow]" if plan["will_stop"] else "[dim]no stop needed[/dim]"
+    console.rule(f"[bold]{plan['container']}[/bold]  [dim]({plan['status']})[/dim]  {stop_note}")
+
+    # Data sources
+    data = plan["data"]
+    if data["enabled"]:
+        if data["sources"]:
+            table = Table(title="Data sources", box=box.SIMPLE, show_header=True,
+                          header_style="bold cyan")
+            table.add_column("Host path", style="white")
+            table.add_column("→ In container")
+            table.add_column("Found via")
+            table.add_column("Kind")
+            table.add_column("Files", justify="right")
+            table.add_column("Size", justify="right")
+            for s in data["sources"]:
+                exists = "" if s["exists"] else " [red](missing)[/red]"
+                table.add_row(
+                    f"{s['host_path']}{exists}",
+                    s["destination"] or "[dim]—[/dim]",
+                    s["method"],
+                    s.get("kind", "dir"),
+                    str(s["files"]),
+                    s["human"],
+                )
+            console.print(table)
+            console.print(f"  [dim]Total data: {data.get('total_human', '0 B')}[/dim]")
+        else:
+            console.print("  [yellow]Data: no sources found — would be skipped[/yellow]")
+    else:
+        console.print("  [dim]Data backup disabled[/dim]")
+
+    # Compose
+    comp = plan["compose"]
+    if comp["enabled"]:
+        if comp["files"]:
+            method = comp["method"]
+            console.print(f"  [cyan]Compose[/cyan] (via {method}, working_dir: {comp['working_dir'] or '—'}):")
+            for f in comp["files"]:
+                miss = "" if f["exists"] else " [red](missing)[/red]"
+                console.print(f"    • {f['path']}{miss}")
+        else:
+            console.print("  [yellow]Compose: nothing discovered — would be skipped[/yellow]")
+    else:
+        console.print("  [dim]Compose backup disabled[/dim]")
+
+    # Internal
+    intern = plan["internal"]
+    if intern["enabled"]:
+        if intern["volumes"]:
+            console.print("  [cyan]Named volumes:[/cyan]")
+            for v in intern["volumes"]:
+                console.print(f"    • {v['name']} → {v['destination']}")
+        else:
+            console.print("  [yellow]Internal: no named volumes — would be skipped[/yellow]")
+
+    # Siblings
+    if plan["siblings"]:
+        console.print(f"  [cyan]Compose siblings to include:[/cyan] {', '.join(plan['siblings'])}")
+
+    # Destination
+    console.print(f"  [dim]Archives would be written to: {plan['dest_dir']}[/dim]")
+
+    # Warnings
+    if plan["warnings"]:
+        console.print()
+        for w in plan["warnings"]:
+            console.print(f"  [yellow]⚠ {w}[/yellow]")
+    console.print()
+
 
 def _show_backup_list(title: str, records) -> None:
     table = Table(title=title, box=box.SIMPLE, show_header=True)
